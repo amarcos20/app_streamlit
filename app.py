@@ -1186,7 +1186,7 @@ elif page == "🔮 Previsão":
                  with cols[col_idx]:
                      # Use number_input or slider depending on the scale/type (int/float)
                      # Adjust step based on data type
-                     step_val = 1 if data[col].dtype == np.int64 else 0.01 # Assuming floats exist
+                     step_val = 1.0 if data[col].dtype == np.int64 else 0.01 # Assuming floats exist
                      user_inputs[col] = st.number_input(f"{col}",
                                                        min_value=min_val,
                                                        max_value=max_val,
