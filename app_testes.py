@@ -2966,10 +2966,8 @@ elif menu == "Documentação": # Menu option name as defined in the sidebar.
     st.markdown("""
     Este sistema oferece um ponto de partida sólido. Possíveis evoluções e melhorias incluem:
     *   **Testar Outros Modelos/Algoritmos:** Integrar mais algoritmos de ML (redes neuronais, ensembles mais avançados) nas secções de Avaliação ou guardar novos modelos otimizados.
-    *   **Otimização de Hiperparâmetros:** Adicionar ferramentas de otimização (busca em grid, busca aleatória) na UI da secção de Avaliação de Modelos (CM) para ajudar a encontrar os melhores parâmetros para os algoritmos temporários.
     *   **Análise de Erros Detalhada:** Incluir visualizações focadas em analisar os casos específicos (amostras) que resultaram em Falsos Positivos ou Falsos Negativos, para identificar padrões nos erros do modelo principal.
     *   **Técnicas de Interpretabilidade Mais Avançadas:** Explorar métodos como SHAP (SHapley Additive exPlanations) ou LIME (Local Interpretable Model-agnostic Explanations) para fornecer insights mais profundos sobre as previsões, tanto a nível global (para o modelo) como individual (para uma previsão específica).
-    *   **Validação Cruzada (Cross-Validation):** Adicionar a opção de realizar validação cruzada na secção de Avaliação de Modelos (CM) para obter métricas de desempenho mais robustas e menos sensíveis a um único split de treino/teste.
     *   **Feedback do Utilizador:** Capturar feedback sobre a utilidade da previsão ou sobre alunos em risco (identificados como "Não Passar") para validar/melhorar o modelo ao longo do tempo.
     """) # PT-PT suggestions.
 
