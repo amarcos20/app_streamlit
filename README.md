@@ -57,12 +57,14 @@ Esta aplicação espera que os seguintes ficheiros existam no diretório correto
 ## Como Executar
 
 1.  Certifique-se de que está no diretório raiz do projeto no terminal.
-2.  Execute o seguinte comando na `bash`:
-    streamlit run app.py
+2.  Execute o seguinte comando :
+```bash
+    streamlit run sua_aplicacao.py
+    ```
   
     (Substitua `app.py` pelo nome do ficheiro Python que contém o código da aplicação Streamlit).
     
-3.  A aplicação será aberta no seu navegador padrão.
+4.  A aplicação será aberta no seu navegador padrão.
 
 ## Estrutura de Pastas Esperada
 
