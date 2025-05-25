@@ -57,11 +57,13 @@ Esta aplicação espera que os seguintes ficheiros existam no diretório correto
 ## Como Executar
 
 1.  Certifique-se de que está no diretório raiz do projeto no terminal.
-2.  Execute o seguinte comando :
-   ```bash
+2.  Execute o seguinte comando na `bash`:
+       ```
+
     run streamli app.py
+    ```
     
-4.  A aplicação será aberta no seu navegador padrão.
+3.  A aplicação será aberta no seu navegador padrão.
 
 ## Estrutura de Pastas Esperada
 
