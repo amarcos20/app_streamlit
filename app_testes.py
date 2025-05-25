@@ -14,6 +14,8 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
 from sklearn.tree import plot_tree # Utilizado para visualizar árvores de decisão
 import matplotlib.pyplot as plt # Utilizado para exibir gráficos da matplotlib, como plot_tree
+from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import cross_validate
 
 # Bibliotecas para controlo de tempo e sistema
 import time
@@ -2346,23 +2348,27 @@ elif menu == "Análise do Modelo Treinado Principal": # Nome do menu atualizado 
 # O código foi refatorado e traduzido, e deve ser funcional agora com base nas correções.
 elif menu == "Avaliação de Modelos (CM)": # Nome do menu atualizado.
     st.markdown('<h1 class="main-header">Avaliação e Comparação de Modelos</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="info-text">Explore o desempenho de diferentes tipos de algoritmos de Machine Learning para a previsão de desempenho estudantil. Selecione um algoritmo abaixo para o treinar **temporariamente** no seu conjunto de treino processado e ver a sua performance (métricas, Matriz de Confusão) no conjunto de teste processado.</p>', unsafe_allow_html=True) # PT-PT intro.
+    st.markdown('<p class="info-text">Explore o desempenho de diferentes tipos de algoritmos de Machine Learning para a previsão de desempenho estudantil. Selecione um algoritmo abaixo para o treinar **temporariamente** no seu conjunto de treino processado e ver a sua performance (métricas, Matriz de Confusão) no conjunto de teste processado ou via Cross-Validation.</p>', unsafe_allow_html=True) # PT-PT intro.
 
     # --- Verificações de Pré-requisitos ---
     # Requer dados de treino E teste processados E nomes de colunas processadas.
-    is_eval_algos_possible = True # Flag de controlo.
+    # is_eval_algos_possible will now check for base data needed for *either* method.
+    is_base_data_loaded = True # Flag de controlo para dados base.
 
     # Verifica se os dataframes processados necessários estão carregados e não vazios.
+    # BOTH train and test are needed *conceptually* for the app flow, even if CV only uses train.
+    # Processed cols are needed for X sets.
     if train_df_processed_global is None or train_df_processed_global.empty or \
        test_df_processed_global is None or test_df_processed_global.empty:
-         is_eval_algos_possible = False
-         # Mensagens de erro/warning já foram exibidas pelas funções de carga no topo.
+         is_base_data_loaded = False
+         st.error("❌ Os conjuntos de dados de treino e/ou teste processados não foram carregados ou estão vazios. Não é possível realizar avaliação.")
+         # Mensagens de erro/warning já podem ter sido exibidas pelas funções de carga no topo.
 
     # Verifica se os nomes das características processadas estão carregados.
     if 'processed_cols' not in locals() or processed_cols is None or not isinstance(processed_cols, (list, pd.Index)) or len(processed_cols) == 0:
-        if is_eval_algos_possible: # Only display this error if data *did* load, but cols didn't.
+        if is_base_data_loaded: # Only display this error if data *did* load, but cols didn't.
              st.error("❌ Os nomes das características processadas ('processed_feature_names.joblib') não foram carregados ou estão vazios. Não é possível preparar os dados de entrada para os modelos.")
-        is_eval_algos_possible = False
+        is_base_data_loaded = False
 
 
     # --- Preparação dos Dados (X_train, y_train, X_test, y_test - todos processados) ---
@@ -2372,11 +2378,16 @@ elif menu == "Avaliação de Modelos (CM)": # Nome do menu atualizado.
     is_binary_alg = False # Flag se o problema binário foi detectado corretamente.
 
     # Variáveis para dados LIMPOS (sem NaNs) e no formato string/numeric final para métricas/report/CM
-    y_true_cleaned_for_metrics = None; y_pred_cleaned_for_metrics = None
-    y_true_cleaned_for_report_cm = None; y_pred_cleaned_for_report_cm = None
+    # These will be populated *after* prediction/CV based on the selected method.
+    # y_true_cleaned_for_metrics = None; y_pred_cleaned_for_metrics = None # Used for test set eval
+    # y_true_cleaned_for_report_cm = None; y_pred_cleaned_for_report_cm = None # Used for test set eval
+
+    # New: Variables for CLEANED training data for CV
+    X_train_cleaned_for_cv = None
+    y_train_cleaned_for_cv = None # Will be numeric 0/1 if binary
 
 
-    if is_eval_algos_possible:
+    if is_base_data_loaded:
         try:
              # Extrai features (X) e target (y) dos dataframes processados carregados.
              X_train_processed_alg = train_df_processed_global.drop(columns=[TARGET_PROCESSED_NAME])
@@ -2385,70 +2396,148 @@ elif menu == "Avaliação de Modelos (CM)": # Nome do menu atualizado.
              X_test_processed_alg = test_df_processed_global.drop(columns=[TARGET_PROCESSED_NAME])
              y_test_original_format_alg = test_df_processed_global[TARGET_PROCESSED_NAME]
 
-
              # Valida compatibilidade das colunas X: treino vs teste vs processed_cols.
              if list(X_train_processed_alg.columns) != list(X_test_processed_alg.columns) or list(X_train_processed_alg.columns) != list(processed_cols):
                  st.error("❌ Erro de compatibilidade: As colunas de características dos conjuntos processados não são consistentes entre treino, teste e a lista carregada de características processadas ('processed_feature_names.joblib'). Não é seguro prosseguir.")
-                 is_eval_algos_possible = False
+                 is_base_data_loaded = False # Can't proceed with either method if cols are messed up.
 
 
              # --- Conversão/Validação da Variável Alvo (y) para Formato Numérico (0/1) e Determinação de Labels ---
              # Para ambos treino e teste. Necessário 0/1 numérico para métricas e `.fit` na maioria dos algos.
              # Necessário labels para o report e CM.
-             unique_y_train_vals = y_train_original_format_alg.dropna().unique()
-             unique_y_test_vals = y_test_original_format_alg.dropna().unique()
+             if is_base_data_loaded: # Only attempt if column check passed
+                 unique_y_train_vals = y_train_original_format_alg.dropna().unique()
+                 unique_y_test_vals = y_test_original_format_alg.dropna().unique()
 
-             if len(unique_y_train_vals) == 2 and len(unique_y_test_vals) == 2 and set(unique_y_train_vals).issubset(set(unique_y_test_vals)): # Binary check + consistency train/test
-                 is_binary_alg = True
-                 all_binary_values = sorted(list(unique_y_train_vals) + list(unique_y_test_vals)) # e.g. [0, 1] or ['não', 'sim']
+                 # Binary check: exactly 2 unique values in TRAIN (dropna) and TEST (dropna) and test values are a subset of train values.
+                 if len(unique_y_train_vals) == 2 and len(unique_y_test_vals) == 2 and set(unique_y_test_vals).issubset(set(unique_y_train_vals)):
+                      is_binary_alg = True
+                      all_binary_values = sorted(list(unique_y_train_vals) + list(unique_y_test_vals)) # e.g. [0, 1] or ['não', 'sim']
 
-                 # Conversão/atribuição para formato NUMÉRICO (0/1) para treino/métricas: y_train/test_processed_numeric_alg.
-                 # Esta variável y_test_processed_numeric_alg é a que tentamos usar para métricas como Acurácia e AUC.
-                 try:
-                      if set(all_binary_values).issubset({0, 1}) and pd.api.types.is_numeric_dtype(y_train_original_format_alg): # Already 0/1 numeric
-                           y_train_processed_numeric_alg = y_train_original_format_alg.astype(int)
-                           y_test_processed_numeric_alg = y_test_original_format_alg.astype(int) # TESTE target numeric 0/1
-                      elif 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 and set(all_binary_values).issubset(set(CLASS_NAMES)) and pd.api.types.is_object_dtype(y_train_original_format_alg): # Strings 'não'/'sim'
-                           # Map to 0/1 using CLASS_NAMES order.
-                           ordered_cat_type = pd.api.types.CategoricalDtype(categories=CLASS_NAMES, ordered=True)
-                           y_train_processed_numeric_alg = y_train_original_format_alg.astype(ordered_cat_type).cat.codes.astype(int)
-                           y_test_processed_numeric_alg = y_test_original_format_alg.astype(ordered_cat_type).cat.codes.astype(int) # TESTE target numeric 0/1
-                      else:
-                           st.error(f"Dados alvo binários processados têm um formato ou valores inesperados ({list(all_binary_values)} / {y_train_original_format_alg.dtype}) para conversão para numérico 0/1. A avaliação dos algoritmos não pode ser garantida.")
-                           is_binary_alg = False # Cannot guarantee 0/1 numeric for fit/metrics.
-                           is_eval_algos_possible = False # Critical failure.
-                 except Exception as e:
-                      st.error(f"Falha na conversão de dados alvo processados para numérico 0/1: {e}")
-                      is_binary_alg = False
-                      is_eval_algos_possible = False # Critical.
-
-
-             elif len(unique_y_train_vals) > 2 or len(unique_y_test_vals) > 2: # Não é binário (multi-classe detectado)
-                  st.warning(f"Conjuntos processados contêm mais de 2 classes (Treino: {list(unique_y_train_vals)}, Teste: {list(unique_y_test_vals)}). A avaliação procederá para multi-classe, mas secções binárias específicas (TP/TN/FP/FN, AUC ROC) não serão exibidas.")
-                  # Usa dados como estão para treino/previsão.
-                  y_train_processed_numeric_alg = y_train_original_format_alg # No attempt to force 0..n-1 for training
-                  y_test_processed_numeric_alg = y_test_original_format_alg # No attempt to force 0..n-1 for metrics (will use original for cleanup later)
-                  is_binary_alg = False # Explicitly False.
+                      # Conversão/atribuição para formato NUMÉRICO (0/1) para treino/métricas: y_train/test_processed_numeric_alg.
+                      # Esta variável y_test_processed_numeric_alg é a que tentamos usar para métricas como Acurácia e AUC.
+                      try:
+                           # Check if already 0/1 numeric
+                           if set(all_binary_values).issubset({0, 1}) and pd.api.types.is_numeric_dtype(y_train_original_format_alg):
+                                y_train_processed_numeric_alg = y_train_original_format_alg.astype(int)
+                                y_test_processed_numeric_alg = y_test_original_format_alg.astype(int) # TESTE target numeric 0/1
+                           # Check if string and CLASS_NAMES matches
+                           elif 'CLASS_NAMES' in globals() and len(CLASS_NAMES) == 2 and set(all_binary_values).issubset(set(CLASS_NAMES)) and pd.api.types.is_object_dtype(y_train_original_format_alg): # Strings 'não'/'sim' matching CLASS_NAMES
+                                # Map to 0/1 using CLASS_NAMES order (CLASS_NAMES[0] -> 0, CLASS_NAMES[1] -> 1).
+                                ordered_cat_type = pd.api.types.CategoricalDtype(categories=CLASS_NAMES, ordered=True)
+                                y_train_processed_numeric_alg = y_train_original_format_alg.astype(ordered_cat_type).cat.codes.astype(int)
+                                y_test_processed_numeric_alg = y_test_original_format_alg.astype(ordered_cat_type).cat.codes.astype(int) # TESTE target numeric 0/1
+                           else:
+                                st.error(f"Dados alvo binários processados têm um formato ou valores inesperados ({list(all_binary_values)} / {y_train_original_format_alg.dtype}) para conversão para numérico 0/1. A avaliação dos algoritmos não pode ser garantida.")
+                                is_binary_alg = False # Cannot guarantee 0/1 numeric for fit/metrics.
+                                is_base_data_loaded = False # Critical failure.
+                      except Exception as e:
+                           st.error(f"Falha na conversão de dados alvo processados para numérico 0/1: {e}")
+                           is_binary_alg = False
+                           is_base_data_loaded = False # Critical.
 
 
-             else: # < 2 valores únicos (vazio, 1 classe) -> covered by initial check.
-                  pass # is_eval_algos_possible should be False.
+                 elif len(unique_y_train_vals) > 2 or len(unique_y_test_vals) > 2: # Multi-classe detectado
+                      st.warning(f"Conjuntos processados contêm mais de 2 classes (Treino: {list(unique_y_train_vals)}, Teste: {list(unique_y_test_vals)}). A avaliação procederá para multi-classe, mas secções binárias específicas (TP/TN/FP/FN, AUC ROC) não serão exibidas.")
+                      # Usa dados como estão para treino/previsão.
+                      y_train_processed_numeric_alg = y_train_original_format_alg # No attempt to force 0..n-1 for training - most sklearn models handle multi-class targets directly.
+                      y_test_processed_numeric_alg = y_test_original_format_alg # No attempt to force 0..n-1 for metrics (will use original for cleanup later)
+                      is_binary_alg = False # Explicitly False.
+
+
+                 else: # < 2 valores únicos (vazio, 1 classe) -> covered by initial check or will be caught by cleaning.
+                      pass # is_base_data_loaded should be False or cleaning will fail.
 
         except Exception as e: # Captura erros genéricos na preparação inicial de X/Y sets.
             st.error(f"❌ Ocorreu um erro genérico durante a preparação dos conjuntos de dados processados X/Y: {e}")
-            is_eval_algos_possible = False
+            is_base_data_loaded = False
+
+    # --- NEW: Prepare Cleaned Training Data for CV (if needed) ---
+    can_do_cv = False # Assume cannot do CV initially
+    if is_base_data_loaded: # Only attempt CV data prep if base data loaded successfully
+        try:
+            # Combine X_train and y_train (using the _numeric_alg version which is 0/1 if binary)
+            # Ensure the target is added with a temporary, known name.
+            temp_train_cv_df = X_train_processed_alg.copy()
+            temp_train_cv_df['_temp_target_col'] = y_train_processed_numeric_alg # Use numeric target for CV data prep
+
+            # Drop rows with *any* NaN (in features or target) for CV
+            temp_train_cv_df_cleaned = temp_train_cv_df.dropna()
+
+            X_train_cleaned_for_cv = temp_train_cv_df_cleaned.drop(columns=['_temp_target_col'])
+            y_train_cleaned_for_cv = temp_train_cv_df_cleaned['_temp_target_col']
+
+            # Check if enough data remains after cleaning for CV (at least n_splits samples, and ideally > 0 total samples)
+            # Check for minimum samples per class if binary for StratifiedKFold
+            min_samples_needed_cv = 2 # Basic minimum for splitting
+            if is_binary_alg:
+                 # StratifiedKFold needs at least 2 samples of *each* class in each fold.
+                 # This implies at least k * 2 samples total for binary. Let's just check total is > k.
+                 min_samples_needed_cv = 5 # A bit more robust minimum
+                 if n_splits := st.session_state.get("cv_n_splits", 5): # Get default or slider value early if possible
+                      min_samples_needed_cv = max(min_samples_needed_cv, n_splits) # Ensure at least k samples
+
+            if len(X_train_cleaned_for_cv) < min_samples_needed_cv:
+                 st.warning(f"Após remover valores nulos do conjunto de treino, não há amostras suficientes ({len(X_train_cleaned_for_cv)}) para executar Cross-Validation (necessário >={min_samples_needed_cv} samples).")
+                 can_do_cv = False
+            elif is_binary_alg and len(y_train_cleaned_for_cv.unique()) < 2:
+                 st.warning("Após remover valores nulos, o conjunto de treino para CV tem apenas uma classe. Não é possível executar Cross-Validation estratificada para classificação binária.")
+                 can_do_cv = False
+            else:
+                 can_do_cv = True # CV data prepared and seems sufficient.
+
+
+        except Exception as e:
+             st.error(f"❌ Ocorreu um erro durante a limpeza dos dados de treino para Cross-Validation: {e}")
+             can_do_cv = False # Prevent CV if cleaning fails.
+
+
+    # --- Seleção do Método de Avaliação ---
+    st.markdown('<h3 class="sub-header">Método de Avaliação</h3>', unsafe_allow_html=True)
+    evaluation_method = st.radio(
+        "Selecione como avaliar o modelo:",
+        ["Avaliação no Conjunto de Teste", "Cross-Validation (StratifiedKFold)"],
+        key="evaluation_method_selector"
+    )
+
+    # --- Configuração Específica do Método ---
+    n_splits = 5 # Default value for CV folds
+    if evaluation_method == "Cross-Validation (StratifiedKFold)":
+         if not can_do_cv:
+             st.error("Não é possível executar Cross-Validation com os dados de treino processados limpos. Verifique as mensagens de erro ou aviso acima.")
+             # This prevents the button from appearing below if CV is selected and not possible.
+             # We'll handle this by checking the `can_run_evaluation` flag before showing the model selection.
+         else:
+             st.markdown('#### Configuração de Cross-Validation')
+             # Slider for number of folds, ensure min is 2. Max can be size of cleaned data, but 10 is reasonable limit.
+             n_splits = st.slider("Número de Folds (k)", 2, min(10, len(X_train_cleaned_for_cv) if can_do_cv else 10), 5, key="cv_n_splits")
+             # Re-check min samples needed with the selected n_splits
+             min_samples_needed_cv = n_splits
+             if is_binary_alg: min_samples_needed_cv = max(min_samples_needed_cv, n_splits) # Ensure at least k if binary
+             if len(X_train_cleaned_for_cv) < min_samples_needed_cv:
+                 st.warning(f"O número de folds selecionado ({n_splits}) é demasiado alto para o número de amostras de treino limpas disponíveis ({len(X_train_cleaned_for_cv)}). Reduza o número de folds.")
+                 can_do_cv = False # Cannot proceed with CV with this setting
+
+             # Add info about StratifiedKFold
+             if can_do_cv:
+                 if is_binary_alg: st.info(f"Será usada validação cruzada estratificada ({n_splits}-Fold) adequada para dados binários.")
+                 else: st.info(f"Será usada validação cruzada estratificada ({n_splits}-Fold) para dados multi-classe (se possível).") # StratifiedKFold works for multi-class too.
 
 
     # --- Seleção do Algoritmo e Configuração ---
-    if is_eval_algos_possible: # Continua só se os dados X/Y processados foram preparados.
+    # Only show model selection and button if base data is loaded AND the chosen method is possible.
+    can_run_evaluation = is_base_data_loaded and (evaluation_method == "Avaliação no Conjunto de Teste" or (evaluation_method == "Cross-Validation (StratifiedKFold)" and can_do_cv))
+
+
+    if can_run_evaluation:
         st.markdown('<h3 class="sub-header">Seleção e Configuração do Algoritmo</h3>', unsafe_allow_html=True) # Sub-cabeçalho PT-PT.
 
         # Certifique que AVAILABLE_MODELS_FOR_ANALYSIS está definido
         if 'AVAILABLE_MODELS_FOR_ANALYSIS' not in globals() or not AVAILABLE_MODELS_FOR_ANALYSIS:
              st.error("Erro interno: Lista de modelos disponíveis (AVAILABLE_MODELS_FOR_ANALYSIS) não definida ou vazia.")
-             is_eval_algos_possible = False # Não pode continuar.
+             can_run_evaluation = False # Cannot continue.
 
-        if is_eval_algos_possible:
+        if can_run_evaluation: # Double check flag before proceeding
             selected_model_name_alg = st.selectbox(
                 "Escolha o tipo de algoritmo para treinar temporariamente:",
                 list(AVAILABLE_MODELS_FOR_ANALYSIS.keys()),
@@ -2460,15 +2549,18 @@ elif menu == "Avaliação de Modelos (CM)": # Nome do menu atualizado.
             model_params_alg = {} # Dicionário para parâmetros do modelo selecionado dinamicamente.
             current_model_base_instance = AVAILABLE_MODELS_FOR_ANALYSIS.get(selected_model_name_alg)
 
+            # Data size limits for parameters (use training data size for KNN, min_samples_split)
+            train_data_size = len(X_train_processed_alg) if X_train_processed_alg is not None else 0
+
             if current_model_base_instance is not None:
                  model_class_for_alg = type(current_model_base_instance) # Get class type from base instance.
 
                  # Display specific parameter sliders based on model name. Uses `getattr` to check default parameter value existence.
-                 # (O código de configuração de parâmetros mantém-se o mesmo, omitido aqui para brevidade, mas deve estar no seu código original)
+                 # (O código de configuração de parâmetros mantém-se o mesmo)
                  if selected_model_name_alg == "KNN":
                      default_n = getattr(current_model_base_instance, 'n_neighbors', 5)
-                     # Garante que n_neighbors não excede o número de amostras de treino
-                     max_n_neighbors = len(X_train_processed_alg) - 1 if len(X_train_processed_alg) > 1 else 1
+                     # Garante que n_neighbors não excede o número de amostras de treino - 1 (para ter pelo menos 1 vizinho diferente da própria amostra na maioria dos casos)
+                     max_n_neighbors = max(1, train_data_size - 1) # Ensure min 1 neighbor if data exists
                      model_params_alg['n_neighbors'] = st.slider(f"**{selected_model_name_alg}**: Número de Vizinhos (`n_neighbors`)", 1, max_n_neighbors, min(int(default_n), max_n_neighbors), key=f"{selected_model_name_alg}_n_neighbors_alg")
 
                  elif selected_model_name_alg in ["Árvore de Decisão", "Random Forest"]:
@@ -2481,7 +2573,7 @@ elif menu == "Avaliação de Modelos (CM)": # Nome do menu atualizado.
 
                      default_min_samples_split = getattr(current_model_base_instance, 'min_samples_split', 2)
                      # min_samples_split cannot exceed the number of training samples.
-                     max_min_samples_split = len(X_train_processed_alg) if len(X_train_processed_alg) > 0 else 2
+                     max_min_samples_split = max(2, train_data_size) # Ensure min 2
                      model_params_alg['min_samples_split'] = st.slider(f"**{selected_model_name_alg}**: Mínimo de Amostras para Dividir (`min_samples_split`)", 2, min(20, max_min_samples_split), min(int(default_min_samples_split), max_min_samples_split), key=f"{selected_model_name_alg}_min_samples_split_alg")
 
                      if selected_model_name_alg == "Random Forest":
@@ -2495,401 +2587,549 @@ elif menu == "Avaliação de Modelos (CM)": # Nome do menu atualizado.
 
             else: # selected_model_name_alg not found in AVAILABLE_MODELS_FOR_ANALYSIS
                  st.error(f"Erro interno: Algoritmo selecionado '{selected_model_name_alg}' não encontrado na lista AVAILABLE_MODELS_FOR_ANALYSIS.")
-                 is_eval_algos_possible = False # Can't proceed if the base model instance isn't found.
+                 can_run_evaluation = False # Can't proceed if the base model instance isn't found.
 
 
         # --- Botão para Treinar e Avaliar o Algoritmo Selecionado ---
-        # Only active if `is_eval_algos_possible` is True (data is prepared and base model instance found).
-        if is_eval_algos_possible and st.button(f"🏃‍♂️ Treinar e Avaliar: {selected_model_name_alg}", key="run_alg_evaluation_button"):
+        # Button is active only if `can_run_evaluation` is True.
+        if st.button(f"🏃‍♂️ Executar Avaliação: {selected_model_name_alg} ({evaluation_method})", key="run_alg_evaluation_button"):
 
-            loading_animation(f"A treinar {selected_model_name_alg} e avaliar no teste...")
+            # Determine loading message based on method
+            loading_msg = f"A executar {n_splits}-Fold CV para {selected_model_name_alg}..." if evaluation_method == "Cross-Validation (StratifiedKFold)" else f"A treinar {selected_model_name_alg} e avaliar no teste..."
+            loading_animation(loading_msg)
 
             try: # Try block for the dynamic training and evaluation process.
                 # --- Instanciar o Modelo com Parâmetros Selecionados ---
                 if 'model_class_for_alg' not in locals(): raise ValueError("Classe do modelo não definida antes da instanciação.")
-                model_instance_to_eval = model_class_for_alg(**model_params_alg)
-
-
-                # --- Treinar o Modelo (usando dados de treino numéricos 0/1 se binário) ---
-                st.write(f"A treinar modelo ({type(model_instance_to_eval).__name__})...")
-                # Use numeric target (0/1) for binary training, original target for multi-class (sklearn handles).
-                y_train_fit = y_train_processed_numeric_alg if is_binary_alg else y_train_original_format_alg
-                model_instance_to_eval.fit(X_train_processed_alg, y_train_fit)
-                st.success(f"✅ Modelo '{selected_model_name_alg}' treinado com sucesso no conjunto de treino.")
-
-
-                # --- Avaliar o Modelo no Conjunto de Teste ---
-                st.write("A avaliar no conjunto de teste processado...")
-                y_pred_alg = model_instance_to_eval.predict(X_test_processed_alg) # Predict.
-
-                y_proba_alg = None # Get probabilities if model supports it (for AUC).
-                if hasattr(model_instance_to_eval, 'predict_proba'):
-                     try: y_proba_alg = model_instance_to_eval.predict_proba(X_test_processed_alg)
-                     except Exception as proba_e: st.info(f"Não foi possível obter probabilidades ({proba_e}).")
-
-                # --- Preparação dos Dados Limpos para Métricas/Report/CM ---
-                # Combine y_true (original test target) and y_pred (raw prediction) to drop NaNs consistently.
-                # Use the original format for target, as we will map it to strings for report/CM later if binary.
-                # Ensure y_pred is in a pandas Series to use .dropna() and .astype(str).
-                y_pred_series = pd.Series(y_pred_alg) # Convert predictions to Series for easier handling
-
-                # Create a temporary DataFrame to drop NaNs where *either* true or predicted is NaN.
-                temp_eval_df = pd.DataFrame({'y_true': y_test_original_format_alg, 'y_pred': y_pred_series})
-                temp_eval_df_cleaned = temp_eval_df.dropna()
-
-                # Extract cleaned true and predicted values
-                y_true_cleaned = temp_eval_df_cleaned['y_true']
-                y_pred_cleaned = temp_eval_df_cleaned['y_pred']
-
-                # Convert cleaned true and predicted values to the final format needed for classification_report and CM plotting.
-                # For binary, we want strings ('Não', 'Sim') if possible. For multi-class, original values as strings.
-                y_true_cleaned_for_report_cm = y_true_cleaned.astype(str) # Default to string
-                y_pred_cleaned_for_report_cm = y_pred_cleaned.astype(str) # Default to string
-
-                # If binary and the cleaned values are 0/1 numeric, map them to CLASS_NAMES strings for consistency in report/CM.
-                if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2:
-                     if pd.api.types.is_numeric_dtype(y_true_cleaned) and set(y_true_cleaned.unique()).issubset({0, 1}):
-                          try:
-                              mapping_numeric_to_string = {0: CLASS_NAMES[0], 1: CLASS_NAMES[1]}
-                              y_true_cleaned_for_report_cm = y_true_cleaned.map(mapping_numeric_to_string).fillna(y_true_cleaned.astype(str))
-                          except Exception as map_e: st.warning(f"Falha ao mapear y_true (0/1) para strings para CM/Relatório: {map_e}")
-
-                     if pd.api.types.is_numeric_dtype(y_pred_cleaned) and set(y_pred_cleaned.unique()).issubset({0, 1}):
-                          try:
-                              mapping_numeric_to_string = {0: CLASS_NAMES[0], 1: CLASS_NAMES[1]}
-                              y_pred_cleaned_for_report_cm = y_pred_cleaned.map(mapping_numeric_to_string).fillna(y_pred_cleaned.astype(str))
-                          except Exception as map_e: st.warning(f"Falha ao mapear y_pred (0/1) para strings para CM/Relatório: {map_e}")
-                # Else: If not binary or CLASS_NAMES not defined/incomplete, y_true/pred cleaned are just converted to strings by default.
-
-
-                # Ensure cleaned data has enough samples for metrics
-                if len(y_true_cleaned) == 0:
-                     st.warning("Após remover valores nulos, não há amostras suficientes para calcular métricas de avaliação. Não é possível gerar o relatório.")
-                     # Skip metric/report/CM calculations.
-                     # Jumps to the next iteration of the main loop if inside one, otherwise effectively ends the evaluation section here. (Assuming not inside a loop, a simple `return` or `break` structure might be better depending on overall app flow).
-                     # For this snippet context, let's just print info and skip the rest of the try block:
-                     # raise StopIteration("No data after cleaning") # Or similar control flow
-
-
-                # --- Calcula e Exibe Métricas de Avaliação ---
-                st.markdown('<h3 class="sub-header">Resultados da Avaliação no Conjunto de Teste</h3>', unsafe_allow_html=True)
-
-                # Acurácia: Needs y_true and y_pred in compatible formats (e.g., both 0/1 numeric or both strings 'Não'/'Sim').
-                # Use the cleaned numeric targets (y_true_cleaned_for_metrics - which is the 0/1 version if binary)
-                # and convert predictions to match that numeric format if possible for accuracy.
-                # Let's use the cleaned data, converting them to numeric 0/1 if it's a binary problem.
-
-                y_true_cleaned_for_metrics = y_true_cleaned # Start with cleaned data
-                y_pred_cleaned_for_metrics = y_pred_cleaned # Start with cleaned data
-
-                if is_binary_alg:
-                    # Ensure both are numeric 0/1 for standard metrics like accuracy_score
-                    if not pd.api.types.is_numeric_dtype(y_true_cleaned_for_metrics) or not set(y_true_cleaned_for_metrics.unique()).issubset({0, 1}):
-                         # True target is string 'Não'/'Sim'. Convert to 0/1.
-                         try:
-                             ordered_cat_type = pd.api.types.CategoricalDtype(categories=CLASS_NAMES, ordered=True)
-                             y_true_cleaned_for_metrics = y_true_cleaned_for_report_cm.astype(ordered_cat_type).cat.codes # Use report_cm strings which are mapped
-                         except Exception as e: st.warning(f"Falha ao converter y_true limpo para 0/1 para métricas: {e}")
-
-                    if not pd.api.types.is_numeric_dtype(y_pred_cleaned_for_metrics) or not set(y_pred_cleaned_for_metrics.unique()).issubset({0, 1}):
-                         # Predicted target is string 'Não'/'Sim'. Convert to 0/1.
-                         try:
-                              ordered_cat_type = pd.api.types.CategoricalDtype(categories=CLASS_NAMES, ordered=True)
-                              y_pred_cleaned_for_metrics = y_pred_cleaned_for_report_cm.astype(ordered_cat_type).cat.codes # Use report_cm strings which are mapped
-                         except Exception as e: st.warning(f"Falha ao converter y_pred limpo para 0/1 para métricas: {e}")
-
-
-                # Now y_true_cleaned_for_metrics and y_pred_cleaned_for_metrics should ideally be numeric (0/1 for binary).
-                # For multi-class, they will be the raw cleaned numeric or string values.
-
-                # Acurácia
-                try:
-                     accuracy = accuracy_score(y_true_cleaned_for_metrics, y_pred_cleaned_for_metrics) # Use the cleaned, potentially converted data for accuracy.
-                     st.metric("Acurácia", f"{accuracy:.2f}")
-                except Exception as e: st.warning(f"Não foi possível calcular Acurácia: {e}")
-
-
-                # Relatório de Classificação. Usa as labels string limpas.
-                st.markdown(f"#### Relatório de Classificação ({selected_model_name_alg})", unsafe_allow_html=True)
-                try:
-                    # Pass the cleaned STRING labels.
-                    # Explicitly specify the labels parameter using the expected CLASS_NAMES strings if binary.
-                    # This forces the report to only consider these two labels, ignoring others (like 'nan').
-                    report_labels_param = CLASS_NAMES if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else None
-                    # If not binary, let classification_report infer labels from the cleaned data.
-                    # If binary but CLASS_NAMES is missing, it will also infer (and might still fail if 'nan' exists).
-                    # Add check if report_labels_param is None and data contains NaNs.
-                    if report_labels_param is None and ('nan' in y_true_cleaned_for_report_cm.unique() or 'nan' in y_pred_cleaned_for_report_cm.unique()):
-                         st.warning("Dados limpos contêm 'nan' como label. O relatório pode incluir esta classe inesperada.")
-
-
-                    report_dict = classification_report(y_true=y_true_cleaned_for_report_cm, y_pred=y_pred_cleaned_for_report_cm,
-                                                        target_names=CLASS_NAMES if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else None, # Use CLASS_NAMES for display names if binary
-                                                        labels=report_labels_param, # Explicitly specify the labels to consider IF binary
-                                                        output_dict=True, zero_division=0)
-
-                    report_df = pd.DataFrame(report_dict).transpose()
-                    st.dataframe(report_df.round(2), use_container_width=True)
-                except Exception as e:
-                    # Capture the specific error message here to understand if the 'labels' parameter fixed it.
-                    st.error(f"❌ Não foi possível calcular Relatório de Classificação: {e}")
-
-
-                # Métricas Resumo (Médias, F1, AUC)
-                if 'report_df' in locals() and 'weighted avg' in report_df.index:
-                     col_met1, col_met2, col_met3 = st.columns(3)
-                     with col_met1: st.metric("Precisão (Méd. Ponderada)", f"{report_df.loc['weighted avg', 'precision']:.2f}")
-                     with col_met2: st.metric("Recall (Méd. Ponderada)", f"{report_df.loc['weighted avg', 'recall']:.2f}")
-                     with col_met3: st.metric("F1-Score (Méd. Ponderada)", f"{report_df.loc['weighted avg', 'f1-score']:.2f}")
+                # Add random_state for reproducibility if the model class accepts it
+                if 'random_state' in model_class_for_alg().get_params().keys():
+                    model_instance_to_eval = model_class_for_alg(random_state=42, **model_params_alg)
                 else:
-                    # Check if report_df exists but 'weighted avg' isn't there (can happen if only 1 class remains after cleaning)
-                    if 'report_df' in locals() and not report_df.empty:
-                         st.warning("Médias ponderadas do relatório não disponíveis (dataset de teste pode ter apenas uma classe após limpeza, ou pode ser multi-classe).")
-                    else: # report_df doesn't exist (error calculation above) or is empty.
-                         st.info("Médias ponderadas do relatório não disponíveis (não foi possível gerar o relatório de classificação).")
+                     model_instance_to_eval = model_class_for_alg(**model_params_alg)
 
 
-                # AUC ROC (SÓ PARA CLASSIFICAÇÃO BINÁRIA E SE PROBABILIDADES DISPONÍVEIS/COMPATÍVEIS)
-                # Calculation needs y_true in 0/1 numeric and y_proba_alg[:, positive_class_index].
-                # Use y_true_cleaned_for_metrics which should be 0/1 numeric if is_binary_alg is True.
-                roc_auc = None
-                if is_binary_alg and y_proba_alg is not None and y_proba_alg.shape[1] == len(CLASS_NAMES): # Check if problem binary, probs obtained, 2 columns.
-                     try:
-                          # Ensure y_true_cleaned_for_metrics is Series for index alignment with y_proba_alg (if needed, though y_proba is usually numpy)
-                          # And ensure y_true is numeric 0/1 as AUC requires this.
-                          if not pd.api.types.is_numeric_dtype(y_true_cleaned_for_metrics) or not set(y_true_cleaned_for_metrics.unique()).issubset({0,1}):
-                               st.warning("AUC ROC: Target verdadeira não está em formato numérico 0/1 após limpeza. Não é possível calcular AUC.")
-                          elif len(y_true_cleaned_for_metrics) != y_proba_alg.shape[0]:
-                               st.warning(f"AUC ROC: Número de amostras na target limpa ({len(y_true_cleaned_for_metrics)}) não coincide com probabilidades ({y_proba_alg.shape[0]}). Não é possível calcular AUC.") # Should not happen if cleaning was done together.
-                          else:
-                             # Find the index of the numeric label 1 in the model's classes list to get the correct probability column.
-                             # Assume model classes are numeric 0/1 if trained with numeric target.
-                             # Check if model has 'classes_' attribute.
-                             if hasattr(model_instance_to_eval, 'classes_'):
-                                 # Check if the positive class (1) is present in the model's classes.
-                                 if 1 in model_instance_to_eval.classes_:
-                                     index_of_positive_class = list(model_instance_to_eval.classes_).index(1)
-                                     # Use y_true_cleaned_for_metrics (numeric 0/1) and the correct proba column.
-                                     roc_auc = roc_auc_score(y_true=y_true_cleaned_for_metrics, y_score=y_proba_alg[:, index_of_positive_class])
-                                     st.metric("AUC ROC", f"{roc_auc:.2f}")
-                                     if abs(roc_auc - 0.5) < 0.05: st.warning("AUC ROC perto de 0.5, sugere performance próxima do aleatório.")
+                # --- CONDITIONAL EVALUATION LOGIC ---
 
-                                 # Handle case where model classes might be strings ('Não', 'Sim') if it was trained on strings (less common for binary).
-                                 elif 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 and CLASS_NAMES[1] in model_instance_to_eval.classes_:
-                                      st.info("Classes do modelo são strings. Tentando usar o índice da classe positiva ('sim') para AUC.")
-                                      index_of_positive_class = list(model_instance_to_eval.classes_).index(CLASS_NAMES[1])
-                                      # Need y_true in 0/1 numeric for roc_auc_score, which y_true_cleaned_for_metrics should be here.
-                                      roc_auc = roc_auc_score(y_true=y_true_cleaned_for_metrics, y_score=y_proba_alg[:, index_of_positive_class])
-                                      st.metric("AUC ROC", f"{roc_auc:.2f}")
-                                      if abs(roc_auc - 0.5) < 0.05: st.warning("AUC ROC perto de 0.5.")
+                if evaluation_method == "Avaliação no Conjunto de Teste":
+                    # --- STANDARD TEST SET EVALUATION ---
 
-                                 else: st.warning("AUC ROC: Não foi possível determinar a coluna da classe positiva (1 ou 'sim') a partir das classes do modelo.") # Cannot find 1 or 'sim' in model.classes_
+                    st.write(f"A treinar modelo ({type(model_instance_to_eval).__name__}) no conjunto de treino...")
+                    # Use numeric target (0/1) for binary training, original target for multi-class (sklearn handles).
+                    y_train_fit = y_train_processed_numeric_alg if is_binary_alg else y_train_original_format_alg
 
-                             else: st.warning("AUC ROC: Modelo não expõe 'classes_' para determinar a coluna de probabilidade positiva.") # Model lacks classes_ attr.
-
-                     except ValueError as auc_ve: st.warning(f"Não foi possível calcular AUC ROC (ValueError: {auc_ve}). Verifique labels/formatos nos dados limpos.")
-                     except Exception as auc_e: st.warning(f"Erro inesperado ao calcular AUC ROC: {auc_e}")
-
-                elif is_binary_alg: st.info("AUC ROC: N/A (Probabilidades não disponíveis ou formato de output inesperado).") # Binary but missing proba or shape wrong.
+                    # Check if training data is sufficient for fit
+                    if len(X_train_processed_alg) == 0 or len(y_train_fit) == 0 or len(X_train_processed_alg) != len(y_train_fit):
+                         st.error("Dados de treino processados insuficientes ou inconsistentes para treinar o modelo.")
+                         # This is a critical error for this path, but should have been caught by `is_base_data_loaded`.
+                         # Re-raise or handle gracefully if needed, but assuming checks above are sufficient.
+                         raise ValueError("Training data insufficient/inconsistent.")
 
 
-                # --- Exibe Matriz de Confusão ---
-                st.markdown('<h2 class="sub-header">Matriz de Confusão</h2>', unsafe_allow_html=True)
-                # Plotagem da CM: usa os dados STRING limpos (y_true_cleaned_for_report_cm, y_pred_cleaned_for_report_cm)
-                # e passa CLASS_NAMES se binário para garantir rótulos corretos.
-                try:
-                    # plot_confusion_matrix_interactive lida com o cálculo da CM e plot.
-                    # Passa as labels STRING consistentes.
-                    # Pass class_names based on binary flag (CLASS_NAMES if binary, None if multi-class).
-                    cm_class_names = CLASS_NAMES if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else None
-                    # If cm_class_names is None, plot_confusion_matrix_interactive should infer from data.
-
-                    fig_cm_alg, cm_matrix_alg = plot_confusion_matrix_interactive(
-                        y_true=y_true_cleaned_for_report_cm, # String labels cleaned
-                        y_pred=y_pred_cleaned_for_report_cm, # String labels cleaned
-                        class_names=cm_class_names # Pass CLASS_NAMES if binary, else let infer
-                    )
-
-                    st.plotly_chart(fig_cm_alg, use_container_width=True)
-                except Exception as e: st.error(f"❌ Não foi possível plotar a Matriz de Confusão: {e}")
+                    model_instance_to_eval.fit(X_train_processed_alg, y_train_fit)
+                    st.success(f"✅ Modelo '{selected_model_name_alg}' treinado com sucesso no conjunto de treino.")
 
 
-                # --- Interpretação da Matriz de Confusão (APENAS PARA CLASSIFICAÇÃO BINÁRIA 2x2) ---
-                # Check if it's binary AND if the CM was successfully computed and is 2x2.
-                if is_binary_alg and 'cm_matrix_alg' in locals() and isinstance(cm_matrix_alg, np.ndarray) and cm_matrix_alg.shape == (2, 2):
-                     st.markdown("---")
-                     st.markdown('<h3 class="sub-header">Interpretação da Matriz de Confusão (Classificação Binária)</h3>', unsafe_allow_html=True)
-                     # Access indices 0/1. Requires that plot_confusion_matrix_interactive used the order CLASS_NAMES[0], CLASS_NAMES[1].
-                     # Assuming plot_confusion_matrix_interactive does this when class_names=CLASS_NAMES is passed.
-                     try:
-                         # If CLASS_NAMES was used for class_names in the plotting function:
-                         # CM[0,0] = True Negatives (Real CLASS_NAMES[0], Pred CLASS_NAMES[0])
-                         # CM[0,1] = False Positives (Real CLASS_NAMES[0], Pred CLASS_NAMES[1])
-                         # CM[1,0] = False Negatives (Real CLASS_NAMES[1], Pred CLASS_NAMES[0])
-                         # CM[1,1] = True Positives (Real CLASS_NAMES[1], Pred CLASS_NAMES[1])
+                    # --- Avaliar o Modelo no Conjunto de Teste ---
+                    st.write("A avaliar no conjunto de teste processado...")
+                    # Check if test data is sufficient for prediction
+                    if len(X_test_processed_alg) == 0 or len(y_test_original_format_alg) == 0 or len(X_test_processed_alg) != len(y_test_original_format_alg):
+                         st.error("Dados de teste processados insuficientes ou inconsistentes para avaliar o modelo.")
+                         raise ValueError("Test data insufficient/inconsistent.")
 
-                         tn, fp, fn, tp = cm_matrix_alg[0,0], cm_matrix_alg[0,1], cm_matrix_alg[1,0], cm_matrix_alg[1,1]
-                         st.write(f"**Verdadeiros Positivos (TP):** {tp}")
-                         st.write(f"**Verdadeiros Negativos (TN):** {tn}")
-                         st.write(f"**Falsos Positivos (FP):** {fp}")
-                         st.write(f"**Falsos Negativos (FN):** {fn}")
-                         st.info(f"""TP: Real '{CLASS_NAMES[1]}', Previsto '{CLASS_NAMES[1]}' | TN: Real '{CLASS_NAMES[0]}', Previsto '{CLASS_NAMES[0]}' | FP: Real '{CLASS_NAMES[0]}', Previsto '{CLASS_NAMES[1]}' | FN: Real '{CLASS_NAMES[1]}', Previsto '{CLASS_NAMES[0]}'.
-                         """)
-                         # Adjusted warning message for clarity.
-                         st.warning(f"💡 **Falsos Positivos (FP):** Alunos que **não** precisavam de ajuda (Real: '{CLASS_NAMES[0]}') foram incorretamente identificados como necessitando (Previsto: '{CLASS_NAMES[1]}'). Custam recursos desnecessários. **Falsos Negativos (FN):** Alunos que **precisavam** de ajuda (Real: '{CLASS_NAMES[1]}') foram incorretamente identificados como não necessitando (Previsto: '{CLASS_NAMES[0]}'). Resultam na perda de oportunidade de intervenção.")
 
-                     except IndexError: st.warning("Erro ao aceder índices da matriz de confusão. A matriz calculada pode não ser 2x2 ou a ordem das classes pode ser inesperada.")
-                     except Exception as cm_extract_e: st.warning(f"Erro ao extrair TP/TN/FP/FN: {cm_extract_e}")
-                # If not binary_alg or cm not 2x2, this section is skipped.
+                    y_pred_alg = model_instance_to_eval.predict(X_test_processed_alg) # Predict.
 
-                # --- Análise de Interpretabilidade Específica do Algoritmo Selecionado ---
-                st.markdown('---')
-                st.markdown(f'<h3 class="sub-header">Análise Única do Algoritmo: {selected_model_name_alg}</h3>', unsafe_allow_html=True)
-                st.markdown(f'<p class="info-text">Informações de interpretabilidade específicas para este tipo de modelo ({selected_model_name_alg}) treinado temporariamente nos dados processados.</p>', unsafe_allow_html=True) # PT-PT
+                    y_proba_alg = None # Get probabilities if model supports it (for AUC).
+                    if hasattr(model_instance_to_eval, 'predict_proba'):
+                         try: y_proba_alg = model_instance_to_eval.predict_proba(X_test_processed_alg)
+                         except Exception as proba_e: st.info(f"Não foi possível obter probabilidades ({proba_e}).")
 
-                # `processed_cols` contém os nomes das características APÓS pré-processamento.
-                feature_names_processed_list = processed_cols # Rename for consistency in this block.
+                    # --- Preparação dos Dados Limpos para Métricas/Report/CM (TESTE) ---
+                    # Combine y_true (original test target) and y_pred (raw prediction) to drop NaNs consistently.
+                    # Use the original format for target, as we will map it to strings for report/CM later if binary.
+                    # Ensure y_pred is in a pandas Series to use .dropna() and .astype(str).
+                    y_pred_series = pd.Series(y_pred_alg, index=y_test_original_format_alg.index) # Convert predictions to Series with matching index
 
-                # --- Interpretabilidade específica baseada no `selected_model_name_alg` ---
-                # Uses `model_instance_to_eval` which is the trained instance.
+                    # Create a temporary DataFrame to drop NaNs where *either* true or predicted is NaN.
+                    temp_eval_df = pd.DataFrame({'y_true': y_test_original_format_alg, 'y_pred': y_pred_series})
+                    temp_eval_df_cleaned = temp_eval_df.dropna()
 
-                # (O código de interpretabilidade por modelo mantém-se o mesmo, omitido aqui para brevidade, mas deve estar no seu código original)
-                # Certifique-se que plot_tree e matplotlib.pyplot (plt) estão importados e que plt.close() é chamado após cada plotagem.
-                # Certifique-se que px (plotly.express) está importado.
+                    # Extract cleaned true and predicted values
+                    y_true_cleaned = temp_eval_df_cleaned['y_true']
+                    y_pred_cleaned = temp_eval_df_cleaned['y_pred']
 
-                if selected_model_name_alg == "Árvore de Decisão": # Plot Decision Tree (Matplotlib).
-                    st.write("#### Visualização da Árvore")
-                    st.info(f"A visualização mostra a árvore de decisão treinada, limitada à profundidade **{model_params_alg.get('max_depth', 'configurada ou default')}** ou até 6 níveis para clareza.")
-                    # ... (código de plotagem da árvore de decisão) ...
-                    tree_actual_depth = model_instance_to_eval.get_depth() if hasattr(model_instance_to_eval, 'get_depth') else None
-                    max_visual_limit = 6 # Visual limit for plot.
-                    depth_options_dt = [model_params_alg.get('max_depth', float('inf')) if model_params_alg.get('max_depth') is not None else float('inf'),
-                                        tree_actual_depth if tree_actual_depth is not None else float('inf'), max_visual_limit]
-                    depth_to_plot_dt = int(min(depth_options_dt))
+                    # Convert cleaned true and predicted values to the final format needed for classification_report and CM plotting.
+                    # For binary, we want strings ('Não', 'Sim') if possible. For multi-class, original values as strings.
+                    y_true_cleaned_for_report_cm = y_true_cleaned.astype(str) # Default to string
+                    y_pred_cleaned_for_report_cm = y_pred_cleaned.astype(str) # Default to string
 
-                    if tree_actual_depth is not None and tree_actual_depth == 0: st.info("Árvore tem profundidade 0. Nada a visualizar.")
-                    elif tree_actual_depth is not None and depth_to_plot_dt > 0 and feature_names_processed_list: # Only plot if tree is not trivial, plot depth > 0, and feature names exist.
+                    # If binary and the cleaned values are 0/1 numeric, map them to CLASS_NAMES strings for consistency in report/CM.
+                    if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2:
+                         # Mapping based on the expected order [0->CLASS_NAMES[0], 1->CLASS_NAMES[1]]
+                         mapping_numeric_to_string = {0: CLASS_NAMES[0], 1: CLASS_NAMES[1]}
                          try:
-                             fig_width_dt = max(20, len(feature_names_processed_list) * 0.3); fig_width_dt = min(fig_width_dt, 60) # Adjusted size limits.
-                             fig_height_dt = max(8, depth_to_plot_dt * 1.5); fig_height_dt = min(fig_height_dt, 60) # Adjusted size limits.
+                             # Apply mapping only if the series is numeric (or contains 0/1 as objects/strings that can be converted)
+                             if pd.api.types.is_numeric_dtype(y_true_cleaned): # If already numeric 0/1
+                                  y_true_cleaned_for_report_cm = y_true_cleaned.map(mapping_numeric_to_string).fillna(y_true_cleaned.astype(str))
+                             elif all(v in ['0','1'] for v in y_true_cleaned.astype(str).unique()): # If strings '0'/'1'
+                                  y_true_cleaned_for_report_cm = y_true_cleaned.astype(int).map(mapping_numeric_to_string).fillna(y_true_cleaned.astype(str))
+                             # Otherwise, it's already something else (strings like 'Não'/'Sim' or other unexpected), leave as is (will be .astype(str) from above)
+                         except Exception as map_e: st.warning(f"Falha ao mapear y_true (0/1 ou string 0/1) para strings para CM/Relatório: {map_e}")
 
-                             fig_tree_dt, ax_tree_dt = plt.subplots(figsize=(fig_width_dt, fig_height_dt))
-                             # Use the string labels from CLASS_NAMES for plotting.
-                             plot_tree(model_instance_to_eval, ax=ax_tree_dt, filled=True,
-                                      feature_names=feature_names_processed_list,
-                                      class_names=[str(c) for c in CLASS_NAMES] if 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else [str(c) for c in model_instance_to_eval.classes_], # Use CLASS_NAMES if available and binary, else model's classes
-                                      rounded=True, fontsize=9, max_depth=depth_to_plot_dt, impurity=False, node_ids=False, proportion=True)
-                             st.pyplot(fig_tree_dt)
-                         except Exception as tree_e: st.error(f"❌ Não foi possível gerar a visualização da árvore: {tree_e}.")
-                         finally: plt.close(fig_tree_dt) # ESSENTIAL: Close matplotlib figures.
-                    else: st.info("Não foi possível plotar a árvore (verifique profundidade ou features).")
-
-                elif selected_model_name_alg == "Random Forest": # Feature Importance & 1st tree plot (Matplotlib/Plotly).
-                    # Feature Importance for the ensemble.
-                    st.write("#### Importância das Características (Ensemble)")
-                    if hasattr(model_instance_to_eval, 'feature_importances_') and len(model_instance_to_eval.feature_importances_) == len(feature_names_processed_list):
                          try:
-                             importance_df_rf = pd.DataFrame({'Característica Processada': feature_names_processed_list, 'Importância': model_instance_to_eval.feature_importances_}).sort_values('Importância', ascending=False)
-                             fig_imp_rf = px.bar(importance_df_rf.head(min(20, len(importance_df_rf))), x='Importância', y='Característica Processada', orientation='h', color='Importância', color_continuous_scale=px.colors.sequential.Viridis, title=f"Importância das Características ({selected_model_name_alg})")
-                             fig_imp_rf.update_layout(yaxis={'categoryorder':'total ascending'})
-                             st.plotly_chart(fig_imp_rf, use_container_width=True)
-                             st.info("Importância agregada das características através das árvores do ensemble.")
-                         except Exception as e: st.error(f"❌ Erro ao exibir importância de features RF: {e}")
-                    else: st.warning("Importância das características RF não disponível ou incompatível.")
+                             if pd.api.types.is_numeric_dtype(y_pred_cleaned):
+                                  y_pred_cleaned_for_report_cm = y_pred_cleaned.map(mapping_numeric_to_string).fillna(y_pred_cleaned.astype(str))
+                             elif all(v in ['0','1'] for v in y_pred_cleaned.astype(str).unique()):
+                                  y_pred_cleaned_for_report_cm = y_pred_cleaned.astype(int).map(mapping_numeric_to_string).fillna(y_pred_cleaned.astype(str))
+                         except Exception as map_e: st.warning(f"Falha ao mapear y_pred (0/1 ou string 0/1) para strings para CM/Relatório: {map_e}")
+                    # Else: If not binary or CLASS_NAMES not defined/incomplete, y_true/pred cleaned are just converted to strings by default above.
 
-                    # Plot first tree (optional).
-                    st.write("#### Visualização da Primeira Árvore (Exemplo)")
-                    st.info(f"O Random Forest ({selected_model_name_alg}) usa {model_instance_to_eval.n_estimators if hasattr(model_instance_to_eval, 'n_estimators') else 'várias'} árvores. Visualização da primeira (`estimators_[0]`). Ajuste Profundidade Máxima nas configurações para simplificar.")
-                    if hasattr(model_instance_to_eval, 'estimators_') and len(model_instance_to_eval.estimators_) > 0:
-                        first_tree = model_instance_to_eval.estimators_[0]
-                        tree_actual_depth = first_tree.get_depth() if hasattr(first_tree, 'get_depth') else None
-                        max_visual_limit = 6
-                        depth_options_rf_tree = [model_params_alg.get('max_depth', float('inf')) if model_params_alg.get('max_depth') is not None else float('inf'),
-                                                tree_actual_depth if tree_actual_depth is not None else float('inf'), max_visual_limit]
-                        depth_to_plot_rf_tree = int(min(depth_options_rf_tree))
 
-                        if tree_actual_depth is not None and tree_actual_depth == 0: st.info("Primeira árvore tem profundidade 0.")
-                        elif tree_actual_depth is not None and depth_to_plot_rf_tree > 0 and feature_names_processed_list:
+                    # Ensure cleaned data has enough samples for metrics
+                    if len(y_true_cleaned) == 0 or len(y_true_cleaned) != len(y_pred_cleaned):
+                         st.warning("Após remover valores nulos do conjunto de teste, não há amostras suficientes ou consistentes para calcular métricas de avaliação. Não é possível gerar o relatório.")
+                         # Skip metric/report/CM calculations.
+                         # Jump to interpretability section if applicable.
+                         metrics_calculated = False
+                    else:
+                         metrics_calculated = True
+                         # --- Calcula e Exibe Métricas de Avaliação (TESTE) ---
+                         st.markdown('<h3 class="sub-header">Resultados da Avaliação no Conjunto de Teste</h3>', unsafe_allow_html=True)
+
+                         # Acurácia: Needs y_true and y_pred in compatible formats.
+                         # Use the cleaned data. If binary, try to convert to 0/1 numeric for accuracy_score if needed.
+                         y_true_cleaned_for_metrics = y_true_cleaned # Start with cleaned data
+                         y_pred_cleaned_for_metrics = y_pred_cleaned # Start with cleaned data
+
+                         # If binary, ensure both are numeric 0/1 for standard metrics like accuracy_score
+                         if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2:
                              try:
-                                fig_width_rf_tree = max(20, len(feature_names_processed_list) * 0.3); fig_width_rf_tree = min(fig_width_rf_tree, 60)
-                                fig_height_rf_tree = max(8, depth_to_plot_rf_tree * 1.5); fig_height_rf_tree = min(fig_height_rf_tree, 60)
-                                fig_tree_rf, ax_tree_rf = plt.subplots(figsize=(fig_width_rf_tree, fig_height_rf_tree))
-                                # Use the string labels from CLASS_NAMES for plotting.
-                                plot_tree(first_tree, ax=ax_tree_rf, filled=True,
-                                         feature_names=feature_names_processed_list,
-                                         class_names=[str(c) for c in CLASS_NAMES] if 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else [str(c) for c in first_tree.classes_] , # Use CLASS_NAMES if available and binary, else model's classes
-                                         rounded=True, fontsize=9, max_depth=depth_to_plot_rf_tree, impurity=False, node_ids=False, proportion=True)
-                                st.pyplot(fig_tree_rf)
-                             except Exception as tree_e: st.error(f"❌ Não foi possível gerar visualização da 1ª árvore RF: {tree_e}.")
-                             finally: plt.close(fig_tree_rf)
-                        else: st.info("Não foi possível plotar a 1ª árvore (verifique profundidade ou features).")
-                    else: st.warning("Estimadores da floresta (árvores individuais) não acessíveis após treino.")
+                                  # Convert true targets to 0/1 numeric if they aren't already
+                                  if not pd.api.types.is_numeric_dtype(y_true_cleaned_for_metrics) or not set(y_true_cleaned_for_metrics.dropna().unique()).issubset({0, 1}):
+                                       ordered_cat_type = pd.api.types.CategoricalDtype(categories=CLASS_NAMES, ordered=True) # Map CLASS_NAMES[0]->0, CLASS_NAMES[1]->1
+                                       y_true_cleaned_for_metrics = y_true_cleaned_for_report_cm.astype(ordered_cat_type).cat.codes # Use report_cm strings which are mapped
 
-                elif selected_model_name_alg in ["Regressão Logística"] or (selected_model_name_alg.startswith("SVM") and hasattr(model_instance_to_eval, 'coef_') ): # Linear Models (or SVM if it exposes coef_)
-                    st.write("#### Coeficientes das Características")
-                    if hasattr(model_instance_to_eval, 'coef_'):
-                        # Try accessing coefficients (expecting 1D or 2D for binary (1, n_features)).
-                        coef_values_check = model_instance_to_eval.coef_
-                        # Check if the model is binary or multi-class to correctly interpret coef_ shape
-                        if is_binary_alg and hasattr(coef_values_check, 'ndim') and (coef_values_check.ndim == 1 or (coef_values_check.ndim == 2 and coef_values_check.shape[0] == 1)):
-                             coef_values = coef_values_check[0] if coef_values_check.ndim == 2 else coef_values_check
-                             # Check length against processed features.
-                             if len(coef_values) == len(feature_names_processed_list):
-                                try:
-                                     coef_df = pd.DataFrame({'Característica Processada': feature_names_processed_list, 'Coeficiente': coef_values}).sort_values('Coeficiente', ascending=False)
-                                     # Calculate symmetric range.
-                                     coef_min, coef_max = coef_df['Coeficiente'].min(), coef_df['Coeficiente'].max()
-                                     abs_max_coef = max(abs(coef_min if pd.notna(coef_min) else 0), abs(coef_max if pd.notna(coef_max) else 0)) if (pd.notna(coef_min) or pd.notna(coef_max)) else 1e-9 # Avoid zero range
-                                     color_range = [-abs_max_coef, abs_max_coef]
-                                     fig_coef = px.bar(coef_df.head(min(30, len(coef_df))), x='Coeficiente', y='Característica Processada', orientation='h', color='Coeficiente', color_continuous_scale='RdBu', range_color=color_range, title=f"Coeficientes ({selected_model_name_alg})")
-                                     fig_coef.update_layout(yaxis={'categoryorder':'total ascending'})
-                                     st.plotly_chart(fig_coef, use_container_width=True)
-                                     st.info(f"""Coeficientes em modelos lineares como {selected_model_name_alg} indicam a influência linear na probabilidade da classe positiva ('{CLASS_NAMES[1]}' se definido e binário). Magnitude = importância, Sinal = direção do efeito.""")
-                                except Exception as e: st.error(f"❌ Erro ao exibir coeficientes: {e}")
-                             else: st.warning("Número de coeficientes não corresponde às características processadas.")
-                        elif hasattr(coef_values_check, 'ndim') and coef_values_check.ndim > 1: # Multi-class case for coef_ (ndim > 1 rows)
-                             st.warning(f"Modelo {selected_model_name_alg} é multi-classe ou tem estrutura `coef_` diferente do esperado para visualização binária por feature. Não é possível exibir coeficientes por característica individual desta forma.")
-                        else: st.warning(f"Atributo `coef_` do modelo {selected_model_name_alg} tem estrutura inesperada para visualização.") # Not 1D, Not (1, n_features)
-                    else: st.info(f"Modelo {selected_model_name_alg} não possui o atributo `coef_` (geralmente modelos não-lineares ou kernels SVM específicos).")
+                                  # Convert predicted targets to 0/1 numeric if they aren't already
+                                  if not pd.api.types.is_numeric_dtype(y_pred_cleaned_for_metrics) or not set(y_pred_cleaned_for_metrics.dropna().unique()).issubset({0, 1}):
+                                       ordered_cat_type = pd.api.types.CategoricalDtype(categories=CLASS_NAMES, ordered=True) # Map CLASS_NAMES[0]->0, CLASS_NAMES[1]->1
+                                       y_pred_cleaned_for_metrics = y_pred_cleaned_for_report_cm.astype(ordered_cat_type).cat.codes # Use report_cm strings which are mapped
+
+                             except Exception as e: st.warning(f"Falha ao converter y_true/y_pred limpos para 0/1 para métricas (continuando com o formato atual): {e}")
+                             # Note: If conversion fails, accuracy might be calculated on strings/other numerics if sklearn supports.
+
+                         # Acurácia
+                         try:
+                              accuracy = accuracy_score(y_true_cleaned_for_metrics, y_pred_cleaned_for_metrics) # Use the cleaned, potentially converted data for accuracy.
+                              st.metric("Acurácia", f"{accuracy:.2f}")
+                         except Exception as e: st.warning(f"Não foi possível calcular Acurácia: {e}")
 
 
-                elif selected_model_name_alg == "KNN": # Info sobre KNN
-                     st.write("#### Princípios Chave do KNN")
-                     n_neighbors_val = model_instance_to_eval.n_neighbors if hasattr(model_instance_to_eval, 'n_neighbors') else 'N/A'
-                     st.info(f"O algoritmo **K-Nearest Neighbors ({selected_model_name_alg})** classifica uma amostra com base na classe majoritária dos seus **{n_neighbors_val}** vizinhos mais próximos nos dados de treino processados. Não tem interpretabilidade direta via coeficientes ou importâncias de features como outros modelos.")
+                         # Relatório de Classificação. Usa as labels string limpas.
+                         st.markdown(f"#### Relatório de Classificação ({selected_model_name_alg})", unsafe_allow_html=True)
+                         try:
+                             # Pass the cleaned STRING labels.
+                             # Explicitly specify the labels parameter using the expected CLASS_NAMES strings if binary.
+                             # This forces the report to only consider these two labels, ignoring others (like 'nan').
+                             report_labels_param = CLASS_NAMES if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else None
+                             # If not binary, let classification_report infer labels from the cleaned data.
+                             # If binary but CLASS_NAMES is missing, it will also infer (and might still fail if 'nan' exists).
+                             # Check if report_labels_param is None and data contains 'nan' strings.
+                             if report_labels_param is None and ('nan' in y_true_cleaned_for_report_cm.unique() or 'nan' in y_pred_cleaned_for_report_cm.unique()):
+                                  st.warning("Dados limpos contêm 'nan' como label. O relatório pode incluir esta classe inesperada.")
 
-                elif selected_model_name_alg in ["Gradient Boosting", "AdaBoost"]: # Info sobre Boosting + Feature Importance
-                    st.write(f"#### Princípios de Modelos de Boosting ({selected_model_name_alg})")
-                    st.info(f"Modelos de Boosting ({selected_model_name_alg}) constroem iterativamente ensembles de modelos fracos, corrigindo erros anteriores. São poderosos mas menos interpretáveis diretamente que modelos simples.")
-                    # Feature Importance for Boosting if available and consistent.
-                    if hasattr(model_instance_to_eval, 'feature_importances_') and len(model_instance_to_eval.feature_importances_) == len(feature_names_processed_list):
-                        st.write(f"#### Importância das Características ({selected_model_name_alg})")
-                        try:
-                            importance_df_boost = pd.DataFrame({'Característica Processada': feature_names_processed_list, 'Importância': model_instance_to_eval.feature_importances_}).sort_values('Importância', ascending=False)
-                            fig_imp_boost = px.bar(importance_df_boost.head(min(20, len(importance_df_boost))), x='Importância', y='Característica Processada', orientation='h', color='Importância', color_continuous_scale=px.colors.sequential.Viridis, title=f"Importância das Características ({selected_model_name_alg})")
-                            fig_imp_boost.update_layout(yaxis={'categoryorder':'total ascending'})
-                            st.plotly_chart(fig_imp_boost, use_container_width=True)
-                            st.info("Importância agregada das características na redução de erro durante o processo de boosting.")
-                        except Exception as e: st.error(f"❌ Erro ao exibir importância de features Boosting: {e}")
-                    else: st.warning("Importância das características Boosting não disponível ou incompatível.")
+                             report_dict = classification_report(y_true=y_true_cleaned_for_report_cm, y_pred=y_pred_cleaned_for_report_cm,
+                                                                 target_names=CLASS_NAMES if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else None, # Use CLASS_NAMES for display names if binary
+                                                                 labels=report_labels_param, # Explicitly specify the labels to consider IF binary
+                                                                 output_dict=True, zero_division=0)
 
-                else: # Outros modelos em AVAILABLE_MODELS_FOR_ANALYSIS sem análise específica.
-                     st.info(f"Análise de interpretabilidade específica para **{selected_model_name_alg}** não está configurada nesta aplicação.")
+                             report_df = pd.DataFrame(report_dict).transpose()
+                             st.dataframe(report_df.round(2), use_container_width=True)
+                             report_calculated = True # Flag indicating report_df exists
+                         except Exception as e:
+                             st.error(f"❌ Não foi possível calcular Relatório de Classificação: {e}")
+                             report_calculated = False
 
+
+                         # Métricas Resumo (Médias, F1, AUC)
+                         if report_calculated and 'weighted avg' in report_df.index:
+                              col_met1, col_met2, col_met3 = st.columns(3)
+                              with col_met1: st.metric("Precisão (Méd. Ponderada)", f"{report_df.loc['weighted avg', 'precision']:.2f}")
+                              with col_met2: st.metric("Recall (Méd. Ponderada)", f"{report_df.loc['weighted avg', 'recall']:.2f}")
+                              with col_met3: st.metric("F1-Score (Méd. Ponderada)", f"{report_df.loc['weighted avg', 'f1-score']:.2f}")
+                         else:
+                              # Check if report_df exists but 'weighted avg' isn't there (can happen if only 1 class remains after cleaning)
+                              if report_calculated and not report_df.empty:
+                                   st.warning("Médias ponderadas do relatório não disponíveis (dataset de teste pode ter apenas uma classe após limpeza).")
+                              elif metrics_calculated: # report_df doesn't exist (error calculation above) or is empty, but metrics attempt was made.
+                                   st.info("Médias ponderadas do relatório não disponíveis (não foi possível gerar o relatório de classificação).")
+
+
+                         # AUC ROC (SÓ PARA CLASSIFICAÇÃO BINÁRIA E SE PROBABILIDADES DISPONÍVEIS/COMPATÍVEIS)
+                         # Calculation needs y_true in 0/1 numeric and y_proba_alg[:, positive_class_index].
+                         # Use y_true_cleaned_for_metrics which should be 0/1 numeric if is_binary_alg is True.
+                         roc_auc = None
+                         # Check if problem binary, probs obtained, and proba output shape matches expected classes.
+                         if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) == 2 and y_proba_alg is not None and y_proba_alg.shape[1] == len(CLASS_NAMES):
+                              try:
+                                   # Ensure y_true_cleaned_for_metrics is numeric 0/1 as AUC requires this.
+                                   # The cleaning/conversion step above should have attempted this. Check dtype again.
+                                   if not pd.api.types.is_numeric_dtype(y_true_cleaned_for_metrics) or not set(y_true_cleaned_for_metrics.dropna().unique()).issubset({0,1}):
+                                        st.warning("AUC ROC: Target verdadeira não está em formato numérico 0/1 após limpeza. Não é possível calcular AUC.")
+                                   # Align y_proba_alg with cleaned y_true (remove rows where y_true was NaN)
+                                   # The indices of y_test_original_format_alg map to rows in X_test_processed_alg
+                                   # temp_eval_df_cleaned had the index of the cleaned rows.
+                                   y_proba_cleaned = y_proba_alg[temp_eval_df_cleaned.index] # Index into the numpy array
+
+                                   if len(y_true_cleaned_for_metrics) != y_proba_cleaned.shape[0]:
+                                        st.warning(f"AUC ROC: Número de amostras na target limpa ({len(y_true_cleaned_for_metrics)}) não coincide com probabilidades limpas ({y_proba_cleaned.shape[0]}). Não é possível calcular AUC.")
+                                   else:
+                                      # Find the index of the numeric label 1 in the model's classes list to get the correct probability column.
+                                      # Assume model classes are numeric 0/1 if trained with numeric target (y_train_processed_numeric_alg).
+                                      # Check if model has 'classes_' attribute.
+                                      if hasattr(model_instance_to_eval, 'classes_'):
+                                          # Find the index of the positive class (1).
+                                          # model_instance_to_eval.classes_ should be [0, 1] if trained on numeric 0/1.
+                                          # model_instance_to_eval.classes_ could be [CLASS_NAMES[0], CLASS_NAMES[1]] if trained on strings (less common, but possible)
+                                          # We need the probability column corresponding to the label '1'.
+                                          target_label_1_numeric = 1
+                                          if target_label_1_numeric in model_instance_to_eval.classes_:
+                                               index_of_positive_class = list(model_instance_to_eval.classes_).index(target_label_1_numeric)
+                                               # Use y_true_cleaned_for_metrics (numeric 0/1) and the correct proba column.
+                                               roc_auc = roc_auc_score(y_true=y_true_cleaned_for_metrics, y_score=y_proba_cleaned[:, index_of_positive_class])
+                                               st.metric("AUC ROC", f"{roc_auc:.2f}")
+                                               if abs(roc_auc - 0.5) < 0.05: st.warning("AUC ROC perto de 0.5, sugere performance próxima do aleatório.")
+                                          else:
+                                               st.warning("AUC ROC: Não foi possível determinar a coluna da classe positiva (1) a partir das classes do modelo.") # Cannot find 1 in model.classes_
+
+                                      else: st.warning("AUC ROC: Modelo não expõe 'classes_' para determinar a coluna de probabilidade positiva.") # Model lacks classes_ attr.
+
+                              except ValueError as auc_ve: st.warning(f"Não foi possível calcular AUC ROC (ValueError: {auc_ve}). Verifique labels/formatos nos dados limpos.")
+                              except Exception as auc_e: st.warning(f"Erro inesperado ao calcular AUC ROC: {auc_e}")
+
+                         elif is_binary_alg: st.info("AUC ROC: N/A (Probabilidades não disponíveis ou formato de output inesperado).") # Binary but missing proba or shape wrong.
+                         # Not binary, AUC ROC not applicable.
+
+
+                         # --- Exibe Matriz de Confusão (TESTE) ---
+                         st.markdown('<h2 class="sub-header">Matriz de Confusão</h2>', unsafe_allow_html=True)
+                         # Plotagem da CM: usa os dados STRING limpos (y_true_cleaned_for_report_cm, y_pred_cleaned_for_report_cm)
+                         # e passa CLASS_NAMES se binário para garantir rótulos corretos.
+                         try:
+                             # plot_confusion_matrix_interactive lida com o cálculo da CM e plot.
+                             # Passa as labels STRING consistentes.
+                             # Pass class_names based on binary flag (CLASS_NAMES if binary, None if multi-class).
+                             cm_class_names = CLASS_NAMES if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else None
+                             # If cm_class_names is None, plot_confusion_matrix_interactive should infer from data.
+
+                             fig_cm_alg, cm_matrix_alg = plot_confusion_matrix_interactive(
+                                 y_true=y_true_cleaned_for_report_cm, # String labels cleaned
+                                 y_pred=y_pred_cleaned_for_report_cm, # String labels cleaned
+                                 class_names=cm_class_names # Pass CLASS_NAMES if binary, else let infer
+                             )
+
+                             if fig_cm_alg: # Check if plotting was successful
+                                 st.plotly_chart(fig_cm_alg, use_container_width=True)
+                             else: # Error message already shown by plot_confusion_matrix_interactive
+                                 cm_matrix_alg = None # Ensure it's None if plotting failed
+
+                         except Exception as e: st.error(f"❌ Não foi possível plotar a Matriz de Confusão: {e}")
+
+
+                         # --- Interpretação da Matriz de Confusão (APENAS PARA CLASSIFICAÇÃO BINÁRIA 2x2) ---
+                         # Check if it's binary AND if the CM was successfully computed and is 2x2.
+                         if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) == 2 and 'cm_matrix_alg' in locals() and isinstance(cm_matrix_alg, np.ndarray) and cm_matrix_alg.shape == (2, 2):
+                              st.markdown("---")
+                              st.markdown('<h3 class="sub-header">Interpretação da Matriz de Confusão (Classificação Binária)</h3>', unsafe_allow_html=True)
+                              # Access indices 0/1. Requires that plot_confusion_matrix_interactive used the order CLASS_NAMES[0], CLASS_NAMES[1].
+                              # The plot function now tries to ensure this or uses inferred labels.
+                              # Check the labels actually used by the plotting function/confusion_matrix calculation.
+                              try:
+                                  # Re-calculate CM just to be sure about the order based on the cleaned string labels
+                                  # Use the unique sorted labels from the cleaned data as the basis
+                                  actual_labels_used = sorted(list(set(y_true_cleaned_for_report_cm.unique()) | set(y_pred_cleaned_for_report_cm.unique())))
+                                  actual_labels_used = [lbl for lbl in actual_labels_used if lbl != 'nan'] # Ensure 'nan' is not a label
+
+                                  # Check if the expected binary labels are present and in the correct order
+                                  if actual_labels_used == [CLASS_NAMES[0], CLASS_NAMES[1]]:
+                                      # CM should be in the order [CLASS_NAMES[0], CLASS_NAMES[1]]
+                                      # CM[0,0] = TN (Real: CLASS_NAMES[0], Pred: CLASS_NAMES[0])
+                                      # CM[0,1] = FP (Real: CLASS_NAMES[0], Pred: CLASS_NAMES[1])
+                                      # CM[1,0] = FN (Real: CLASS_NAMES[1], Pred: CLASS_NAMES[0])
+                                      # CM[1,1] = TP (Real: CLASS_NAMES[1], Pred: CLASS_NAMES[1])
+                                       tn, fp, fn, tp = cm_matrix_alg[0,0], cm_matrix_alg[0,1], cm_matrix_alg[1,0], cm_matrix_alg[1,1]
+
+                                       st.write(f"**Verdadeiros Positivos (TP):** {tp}")
+                                       st.write(f"**Verdadeiros Negativos (TN):** {tn}")
+                                       st.write(f"**Falsos Positivos (FP):** {fp}")
+                                       st.write(f"**Falsos Negativos (FN):** {fn}")
+                                       st.info(f"""TP: Real '{CLASS_NAMES[1]}', Previsto '{CLASS_NAMES[1]}' | TN: Real '{CLASS_NAMES[0]}', Previsto '{CLASS_NAMES[0]}' | FP: Real '{CLASS_NAMES[0]}', Previsto '{CLASS_NAMES[1]}' | FN: Real '{CLASS_NAMES[1]}', Previsto '{CLASS_NAMES[0]}'.
+                                       """)
+                                       # Adjusted warning message for clarity.
+                                       st.warning(f"💡 **Falsos Positivos (FP):** Alunos que **não** precisavam de ajuda (Real: '{CLASS_NAMES[0]}') foram incorretamente identificados como necessitando (Previsto: '{CLASS_NAMES[1]}'). Custam recursos desnecessários. **Falsos Negativos (FN):** Alunos que **precisavam** de ajuda (Real: '{CLASS_NAMES[1]}') foram incorretamente identificados como não necessitando (Previsto: '{CLASS_NAMES[0]}'). Resultam na perda de oportunidade de intervenção.")
+                                  elif len(actual_labels_used) == 2: # Binary, but labels are in a different order or different names
+                                        st.warning(f"A Matriz de Confusão tem 2 classes, mas os nomes ou a ordem das classes não correspondem diretamente a '{CLASS_NAMES[0]}' e '{CLASS_NAMES[1]}' (labels encontradas: {actual_labels_used}). Não é possível fornecer a interpretação padrão de TP/TN/FP/FN.")
+                                  else: # Not 2 labels after cleaning, or other issue.
+                                       st.warning(f"Após limpeza, a Matriz de Confusão não resultou numa matriz 2x2 com as classes binárias esperadas. (Labels encontradas: {actual_labels_used})")
+
+
+                              except IndexError: st.warning("Erro ao aceder índices da matriz de confusão. A matriz calculada pode não ser 2x2 ou a ordem das classes pode ser inesperada.")
+                              except Exception as cm_extract_e: st.warning(f"Erro ao extrair TP/TN/FP/FN: {cm_extract_e}")
+                         # If not binary_alg or cm not 2x2, this section is skipped.
+
+
+                    # --- Análise de Interpretabilidade Específica do Algoritmo Selecionado ---
+                    # This part runs for the TEST evaluation method because a single model was trained.
+                    st.markdown('---')
+                    st.markdown(f'<h3 class="sub-header">Análise Única do Algoritmo: {selected_model_name_alg}</h3>', unsafe_allow_html=True)
+                    st.markdown(f'<p class="info-text">Informações de interpretabilidade específicas para este tipo de modelo ({selected_model_name_alg}) treinado temporariamente nos dados processados.</p>', unsafe_allow_html=True) # PT-PT
+
+                    # `processed_cols` contém os nomes das características APÓS pré-processamento.
+                    feature_names_processed_list = processed_cols # Rename for consistency in this block.
+
+                    # --- Interpretabilidade específica baseada no `selected_model_name_alg` ---
+                    # Uses `model_instance_to_eval` which is the trained instance.
+
+                    # (O código de interpretabilidade por modelo mantém-se o mesmo)
+                    # Certifique-se que plot_tree e matplotlib.pyplot (plt) estão importados e que plt.close() é chamado após cada plotagem.
+                    # Certifique-se que px (plotly.express) está importado.
+
+                    if selected_model_name_alg == "Árvore de Decisão": # Plot Decision Tree (Matplotlib).
+                         st.write("#### Visualização da Árvore")
+                         st.info(f"A visualização mostra a árvore de decisão treinada, limitada à profundidade **{model_params_alg.get('max_depth', 'configurada ou default')}** ou até 6 níveis para clareza.")
+                         # ... (código de plotagem da árvore de decisão) ...
+                         tree_actual_depth = model_instance_to_eval.get_depth() if hasattr(model_instance_to_eval, 'get_depth') else None
+                         max_visual_limit = 6 # Visual limit for plot.
+                         # Determine the actual depth to plot based on max_depth param, actual tree depth, and visual limit
+                         depth_to_plot_dt = float('inf')
+                         if model_params_alg.get('max_depth') is not None: depth_to_plot_dt = min(depth_to_plot_dt, model_params_alg['max_depth'])
+                         if tree_actual_depth is not None: depth_to_plot_dt = min(depth_to_plot_dt, tree_actual_depth)
+                         depth_to_plot_dt = int(min(depth_to_plot_dt, max_visual_limit)) # Also limit by visual limit
+
+                         if tree_actual_depth is not None and tree_actual_depth == 0: st.info("Árvore tem profundidade 0. Nada a visualizar.")
+                         elif tree_actual_depth is not None and depth_to_plot_dt > 0 and feature_names_processed_list and not X_train_processed_alg.empty: # Only plot if tree is not trivial, plot depth > 0, feature names exist, and training data wasn't empty.
+                              try:
+                                   # Determine class names for plotting based on binary and CLASS_NAMES
+                                   plot_class_names = [str(c) for c in CLASS_NAMES] if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else [str(c) for c in model_instance_to_eval.classes_]
+
+                                   fig_width_dt = max(20, len(feature_names_processed_list) * 0.3); fig_width_dt = min(fig_width_dt, 60) # Adjusted size limits.
+                                   fig_height_dt = max(8, depth_to_plot_dt * 1.5); fig_height_dt = min(fig_height_dt, 60) # Adjusted size limits.
+
+                                   fig_tree_dt, ax_tree_dt = plt.subplots(figsize=(fig_width_dt, fig_height_dt))
+
+                                   plot_tree(model_instance_to_eval, ax=ax_tree_dt, filled=True,
+                                            feature_names=feature_names_processed_list,
+                                            class_names=plot_class_names,
+                                            rounded=True, fontsize=9, max_depth=depth_to_plot_dt, impurity=False, node_ids=False, proportion=True)
+                                   st.pyplot(fig_tree_dt)
+                              except Exception as tree_e: st.error(f"❌ Não foi possível gerar a visualização da árvore: {tree_e}.")
+                              finally: plt.close(fig_tree_dt) # ESSENTIAL: Close matplotlib figures.
+                         else: st.info("Não foi possível plotar a árvore (verifique profundidade, features ou dados de treino).")
+
+                    elif selected_model_name_alg == "Random Forest": # Feature Importance & 1st tree plot (Matplotlib/Plotly).
+                         # Feature Importance for the ensemble.
+                         st.write("#### Importância das Características (Ensemble)")
+                         if hasattr(model_instance_to_eval, 'feature_importances_') and len(model_instance_to_eval.feature_importances_) == len(feature_names_processed_list):
+                              try:
+                                   importance_df_rf = pd.DataFrame({'Característica Processada': feature_names_processed_list, 'Importância': model_instance_to_eval.feature_importances_}).sort_values('Importância', ascending=False)
+                                   fig_imp_rf = px.bar(importance_df_rf.head(min(20, len(importance_df_rf))), x='Importância', y='Característica Processada', orientation='h', color='Importância', color_continuous_scale=px.colors.sequential.Viridis, title=f"Importância das Características ({selected_model_name_alg})")
+                                   fig_imp_rf.update_layout(yaxis={'categoryorder':'total ascending'})
+                                   st.plotly_chart(fig_imp_rf, use_container_width=True)
+                                   st.info("Importância agregada das características através das árvores do ensemble.")
+                              except Exception as e: st.error(f"❌ Erro ao exibir importância de features RF: {e}")
+                         else: st.warning("Importância das características RF não disponível ou incompatível.")
+
+                         # Plot first tree (optional).
+                         st.write("#### Visualização da Primeira Árvore (Exemplo)")
+                         st.info(f"O Random Forest ({selected_model_name_alg}) usa {model_instance_to_eval.n_estimators if hasattr(model_instance_to_eval, 'n_estimators') else 'várias'} árvores. Visualização da primeira (`estimators_[0]`). Ajuste Profundidade Máxima nas configurações para simplificar.")
+                         if hasattr(model_instance_to_eval, 'estimators_') and len(model_instance_to_eval.estimators_) > 0:
+                             first_tree = model_instance_to_eval.estimators_[0]
+                             tree_actual_depth = first_tree.get_depth() if hasattr(first_tree, 'get_depth') else None
+                             max_visual_limit = 6
+                             # Determine the actual depth to plot for this example tree
+                             depth_to_plot_rf_tree = float('inf')
+                             if model_params_alg.get('max_depth') is not None: depth_to_plot_rf_tree = min(depth_to_plot_rf_tree, model_params_alg['max_depth'])
+                             if tree_actual_depth is not None: depth_to_plot_rf_tree = min(depth_to_plot_rf_tree, tree_actual_depth)
+                             depth_to_plot_rf_tree = int(min(depth_to_plot_rf_tree, max_visual_limit))
+
+                             if tree_actual_depth is not None and tree_actual_depth == 0: st.info("Primeira árvore tem profundidade 0.")
+                             elif tree_actual_depth is not None and depth_to_plot_rf_tree > 0 and feature_names_processed_list and not X_train_processed_alg.empty:
+                                  try:
+                                     # Determine class names for plotting based on binary and CLASS_NAMES
+                                     plot_class_names = [str(c) for c in CLASS_NAMES] if is_binary_alg and 'CLASS_NAMES' in globals() and len(CLASS_NAMES) >= 2 else [str(c) for c in first_tree.classes_]
+
+                                     fig_width_rf_tree = max(20, len(feature_names_processed_list) * 0.3); fig_width_rf_tree = min(fig_width_rf_tree, 60)
+                                     fig_height_rf_tree = max(8, depth_to_plot_rf_tree * 1.5); fig_height_rf_tree = min(fig_height_rf_tree, 60)
+                                     fig_tree_rf, ax_tree_rf = plt.subplots(figsize=(fig_width_rf_tree, fig_height_rf_tree))
+
+                                     plot_tree(first_tree, ax=ax_tree_rf, filled=True,
+                                              feature_names=feature_names_processed_list,
+                                              class_names=plot_class_names , # Use CLASS_NAMES if available and binary, else model's classes
+                                              rounded=True, fontsize=9, max_depth=depth_to_plot_rf_tree, impurity=False, node_ids=False, proportion=True)
+                                     st.pyplot(fig_tree_rf)
+                                  except Exception as tree_e: st.error(f"❌ Não foi possível gerar visualização da 1ª árvore RF: {tree_e}.")
+                                  finally: plt.close(fig_tree_rf)
+                             else: st.info("Não foi possível plotar a 1ª árvore (verifique profundidade, features ou dados de treino).")
+                         else: st.warning("Estimadores da floresta (árvores individuais) não acessíveis após treino.")
+
+                    elif selected_model_name_alg in ["Regressão Logística"] or (selected_model_name_alg.startswith("SVM") and hasattr(model_instance_to_eval, 'coef_') ): # Linear Models (or SVM if it exposes coef_)
+                         st.write("#### Coeficientes das Características")
+                         if hasattr(model_instance_to_eval, 'coef_'):
+                             # Try accessing coefficients (expecting 1D or 2D for binary (1, n_features)).
+                             coef_values_check = model_instance_to_eval.coef_
+                             # Check if the model is binary or multi-class to correctly interpret coef_ shape
+                             if is_binary_alg and hasattr(coef_values_check, 'ndim') and (coef_values_check.ndim == 1 or (coef_values_check.ndim == 2 and coef_values_check.shape[0] == 1)):
+                                  coef_values = coef_values_check[0] if coef_values_check.ndim == 2 else coef_values_check
+                                  # Check length against processed features.
+                                  if len(coef_values) == len(feature_names_processed_list):
+                                     try:
+                                          coef_df = pd.DataFrame({'Característica Processada': feature_names_processed_list, 'Coeficiente': coef_values}).sort_values('Coeficiente', ascending=False)
+                                          # Calculate symmetric range.
+                                          coef_min, coef_max = coef_df['Coeficiente'].min(), coef_df['Coeficiente'].max()
+                                          abs_max_coef = max(abs(coef_min if pd.notna(coef_min) else 0), abs(coef_max if pd.notna(coef_max) else 0)) if (pd.notna(coef_min) or pd.notna(coef_max)) else 1e-9 # Avoid zero range
+                                          color_range = [-abs_max_coef, abs_max_coef]
+                                          fig_coef = px.bar(coef_df.head(min(30, len(coef_df))), x='Coeficiente', y='Característica Processada', orientation='h', color='Coeficiente', color_continuous_scale='RdBu', range_color=color_range, title=f"Coeficientes ({selected_model_name_alg})")
+                                          fig_coef.update_layout(yaxis={'categoryorder':'total ascending'})
+                                          st.plotly_chart(fig_coef, use_container_width=True)
+                                          st.info(f"""Coeficientes em modelos lineares como {selected_model_name_alg} indicam a influência linear na probabilidade da classe positiva ('{CLASS_NAMES[1]}' se definido e binário). Magnitude = importância, Sinal = direção do efeito.""")
+                                     except Exception as e: st.error(f"❌ Erro ao exibir coeficientes: {e}")
+                                  else: st.warning("Número de coeficientes não corresponde às características processadas.")
+                             elif hasattr(coef_values_check, 'ndim') and coef_values_check.ndim > 1: # Multi-class case for coef_ (ndim > 1 rows)
+                                  st.warning(f"Modelo {selected_model_name_alg} é multi-classe ou tem estrutura `coef_` diferente do esperado para visualização binária por feature. Não é possível exibir coeficientes por característica individual desta forma.")
+                             else: st.warning(f"Atributo `coef_` do modelo {selected_model_name_alg} tem estrutura inesperada para visualização.") # Not 1D, Not (1, n_features)
+                         else: st.info(f"Modelo {selected_model_name_alg} não possui o atributo `coef_` (geralmente modelos não-lineares ou kernels SVM específicos).")
+
+
+                    elif selected_model_name_alg == "KNN": # Info sobre KNN
+                          st.write("#### Princípios Chave do KNN")
+                          n_neighbors_val = model_instance_to_eval.n_neighbors if hasattr(model_instance_to_eval, 'n_neighbors') else 'N/A'
+                          st.info(f"O algoritmo **K-Nearest Neighbors ({selected_model_name_alg})** classifica uma amostra com base na classe majoritária dos seus **{n_neighbors_val}** vizinhos mais próximos nos dados de treino processados. Não tem interpretabilidade direta via coeficientes ou importâncias de features como outros modelos.")
+
+                    elif selected_model_name_alg in ["Gradient Boosting", "AdaBoost"]: # Info sobre Boosting + Feature Importance
+                         st.write(f"#### Princípios de Modelos de Boosting ({selected_model_name_alg})")
+                         st.info(f"Modelos de Boosting ({selected_model_name_alg}) constroem iterativamente ensembles de modelos fracos, corrigindo erros anteriores. São poderosos mas menos interpretáveis diretamente que modelos simples.")
+                         # Feature Importance for Boosting if available and consistent.
+                         if hasattr(model_instance_to_eval, 'feature_importances_') and len(model_instance_to_eval.feature_importances_) == len(feature_names_processed_list):
+                             st.write(f"#### Importância das Características ({selected_model_name_alg})")
+                             try:
+                                 importance_df_boost = pd.DataFrame({'Característica Processada': feature_names_processed_list, 'Importância': model_instance_to_eval.feature_importances_}).sort_values('Importância', ascending=False)
+                                 fig_imp_boost = px.bar(importance_df_boost.head(min(20, len(importance_df_boost))), x='Importância', y='Característica Processada', orientation='h', color='Importância', color_continuous_scale=px.colors.sequential.Viridis, title=f"Importância das Características ({selected_model_name_alg})")
+                                 fig_imp_boost.update_layout(yaxis={'categoryorder':'total ascending'})
+                                 st.plotly_chart(fig_imp_boost, use_container_width=True)
+                                 st.info("Importância agregada das características na redução de erro durante o processo de boosting.")
+                             except Exception as e: st.error(f"❌ Erro ao exibir importância de features Boosting: {e}")
+                         else: st.warning("Importância das características Boosting não disponível ou incompatível.")
+
+                    else: # Outros modelos em AVAILABLE_MODELS_FOR_ANALYSIS sem análise específica.
+                          st.info(f"Análise de interpretabilidade específica para **{selected_model_name_alg}** não está configurada nesta aplicação.")
+
+
+                elif evaluation_method == "Cross-Validation (StratifiedKFold)":
+                    # --- CROSS-VALIDATION EVALUATION ---
+                    st.write(f"A executar {n_splits}-Fold Cross-Validation para ({type(model_instance_to_eval).__name__})...")
+
+                    # Ensure cleaned data for CV is available and sufficient (should be guaranteed by can_do_cv)
+                    if X_train_cleaned_for_cv is None or y_train_cleaned_for_cv is None or len(X_train_cleaned_for_cv) < n_splits:
+                         st.error("Dados de treino limpos insuficientes para executar Cross-Validation com o número de folds selecionado.")
+                         raise ValueError("Insufficient cleaned data for CV.") # Stop execution gracefully
+
+
+                    # Define scoring metrics
+                    scoring = ['accuracy', 'precision_weighted', 'recall_weighted', 'f1_weighted']
+                    # Add AUC if binary and model supports probabilities
+                    if is_binary_alg:
+                         if hasattr(model_instance_to_eval, 'predict_proba'):
+                             # cross_validate needs the name 'roc_auc' for binary classification AUC
+                             scoring.append('roc_auc')
+                         else:
+                             st.warning("AUC ROC não incluída na Cross-Validation: Modelo não suporta `predict_proba`.")
+                    # For multi-class, roc_auc isn't directly applicable with this standard scorer name.
+                    # Could add multi_class AUC ('roc_auc_ovr' or 'roc_auc_ovo') but keep it simple for now.
+
+
+                    # Define the CV splitter
+                    # Use StratifiedKFold if binary or multi-class classification is possible (more than 1 unique class)
+                    # Otherwise, if only 1 class, KFold might be used or CV is impossible anyway.
+                    # We've already checked for >= 2 unique classes in cleaned training data if binary.
+                    # StratifiedKFold works fine for multi-class as well.
+                    if len(y_train_cleaned_for_cv.unique()) >= 2:
+                         cv_splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42) # Add random_state for reproducibility
+                    else:
+                         # This case should ideally be caught by can_do_cv checks earlier, but double-check.
+                         st.error("Cross-Validation (StratifiedKFold) requer pelo menos 2 classes no conjunto de treino limpo.")
+                         raise ValueError("Insufficient classes for StratifiedKFold.")
+
+
+                    # Perform cross-validation
+                    with st.spinner(f"A executar {n_splits}-fold cross-validation..."):
+                        cv_results = cross_validate(
+                            estimator=model_instance_to_eval,
+                            X=X_train_cleaned_for_cv, # Use cleaned training data
+                            y=y_train_cleaned_for_cv, # Use cleaned training data (numeric 0/1 or original multi-class)
+                            cv=cv_splitter,
+                            scoring=scoring,
+                            return_train_score=False # Typically only test scores are reported for evaluation
+                        )
+
+                    st.success(f"✅ Cross-Validation ({n_splits}-Fold) completa para '{selected_model_name_alg}'.")
+
+                    # Display results
+                    st.markdown('<h3 class="sub-header">Resultados da Cross-Validation</h3>', unsafe_allow_html=True)
+
+                    # Prepare results dictionary for display
+                    cv_summary = {}
+                    for metric in scoring:
+                        # cross_validate names keys like 'test_accuracy', 'test_precision_weighted', etc.
+                        test_metric_key = f'test_{metric}'
+                        if test_metric_key in cv_results:
+                            scores = cv_results[test_metric_key]
+                            cv_summary[metric] = {
+                                'Média': scores.mean(),
+                                'Std Dev': scores.std()
+                            }
+                        # else: Metric was in scoring list but not returned? (e.g. roc_auc for non-classifier).
+                        # cross_validate handles this by not returning the key if scoring fails for a metric.
+                        # So, just skip if key is not in cv_results.
+
+                    if cv_summary: # Only display if we got results
+                        cv_summary_df = pd.DataFrame.from_dict(cv_summary, orient='index')
+                        st.dataframe(cv_summary_df.round(4), use_container_width=True)
+                    else:
+                         st.warning("Nenhuma métrica calculada durante a Cross-Validation.")
+
+
+                    st.info(f"""💡 **Cross-Validation ({n_splits}-Fold):** Avalia o desempenho do modelo dividindo o conjunto de treino em {n_splits} partes (folds). O modelo é treinado {n_splits} vezes, cada vez usando {n_splits-1} folds para treino e 1 fold para validação. As métricas apresentadas são a média dos resultados de cada fold de validação. Isto dá uma estimativa mais robusta do desempenho em dados não vistos comparada a um único split treino/teste.
+
+                    **Nota:** A Matriz de Confusão e o Relatório de Classificação detalhado são tipicamente apresentados para uma única avaliação (como num conjunto de teste separado) ou de forma agregada mais complexa em CV. Estes não são exibidos diretamente aqui para a avaliação por Cross-Validation.
+                    """)
+
+
+                    # --- Análise de Interpretabilidade Específica do Algoritmo Selecionado (SKIPPED FOR CV) ---
+                    st.markdown("---")
+                    st.markdown('<h3 class="sub-header">Análise de Interpretabilidade</h3>', unsafe_allow_html=True)
+                    st.info("A análise de interpretabilidade (viz. importância de features, coeficientes) para a Cross-Validation exigiria treinar um modelo separado no conjunto de treino completo ou analisar múltiplos modelos das folds. Esta secção não está disponível para este método de avaliação.")
+
+
+                # --- End Conditional Evaluation Logic ---
 
             # --- Fim do Bloco Try para Treino e Avaliação Dinâmica ---
-            except StopIteration: # Handled 'No data after cleaning' case
-                 pass # Do nothing more, messages already displayed
+            except ValueError as ve:
+                 st.error(f"❌ Ocorreu um erro de VALOR durante a execução ({evaluation_method}): {ve}")
+                 st.info("Verifique se os dados processados são compatíveis ou se há um problema específico com a configuração do algoritmo ou CV.")
+
             except Exception as e:
-                 st.error(f"❌ Ocorreu um erro inesperado durante o treino e avaliação dinâmica do algoritmo {selected_model_name_alg}: {e}")
+                 # --- Existing error handling for train/eval block ---
+                 st.error(f"❌ Ocorreu um erro inesperado durante a avaliação dinâmica do algoritmo {selected_model_name_alg} ({evaluation_method}): {e}")
                  st.info("Verifique se os dados processados são compatíveis com o algoritmo selecionado ou se há um problema específico com a configuração dos parâmetros.")
                  st.error(f"Detalhe do erro: {e}") # Display detail.
 
-    else: # is_eval_algos_possible is False.
-         # Mensagem genérica já foi exibida pelas verificações iniciais no topo desta secção.
-         st.warning("A secção 'Avaliação de Modelos (CM)' não está completamente funcional porque os conjuntos de dados processados ou os nomes das características processadas não foram carregados com sucesso. Verifique as mensagens no topo da página.")
-
-
+    else: # can_run_evaluation is False.
+         # Messages already displayed by the initial checks or the can_do_cv checks above.
+         if evaluation_method == "Cross-Validation (StratifiedKFold)" and not can_do_cv and is_base_data_loaded:
+              # Specific message for CV not possible despite base data being loaded
+              st.warning("Não é possível prosseguir com Cross-Validation devido a problemas nos dados de treino limpos ou configuração do número de folds.")
+         elif not is_base_data_loaded:
+              st.warning("A secção 'Avaliação de Modelos (CM)' não está completamente funcional porque os conjuntos de dados processados ou os nomes das características processadas não foram carregados com sucesso. Verifique as mensagens no topo da página.")
+         # No button is shown if can_run_evaluation is False.
 
 # --- Secção "Documentação" ---
 # Fornece informação detalhada sobre o dataset, artefactos, e funcionalidades da app.
@@ -2966,8 +3206,10 @@ elif menu == "Documentação": # Menu option name as defined in the sidebar.
     st.markdown("""
     Este sistema oferece um ponto de partida sólido. Possíveis evoluções e melhorias incluem:
     *   **Testar Outros Modelos/Algoritmos:** Integrar mais algoritmos de ML (redes neuronais, ensembles mais avançados) nas secções de Avaliação ou guardar novos modelos otimizados.
+    *   **Otimização de Hiperparâmetros:** Adicionar ferramentas de otimização (busca em grid, busca aleatória) na UI da secção de Avaliação de Modelos (CM) para ajudar a encontrar os melhores parâmetros para os algoritmos temporários.
     *   **Análise de Erros Detalhada:** Incluir visualizações focadas em analisar os casos específicos (amostras) que resultaram em Falsos Positivos ou Falsos Negativos, para identificar padrões nos erros do modelo principal.
     *   **Técnicas de Interpretabilidade Mais Avançadas:** Explorar métodos como SHAP (SHapley Additive exPlanations) ou LIME (Local Interpretable Model-agnostic Explanations) para fornecer insights mais profundos sobre as previsões, tanto a nível global (para o modelo) como individual (para uma previsão específica).
+    *   **Validação Cruzada (Cross-Validation):** Adicionar a opção de realizar validação cruzada na secção de Avaliação de Modelos (CM) para obter métricas de desempenho mais robustas e menos sensíveis a um único split de treino/teste.
     *   **Feedback do Utilizador:** Capturar feedback sobre a utilidade da previsão ou sobre alunos em risco (identificados como "Não Passar") para validar/melhorar o modelo ao longo do tempo.
     """) # PT-PT suggestions.
 
