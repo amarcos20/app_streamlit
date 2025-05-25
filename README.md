@@ -4,6 +4,9 @@
 
 ## Descrição do Projeto
 
+A realização do notebok com uma pipeline completa de Machine Learning que inclui a visualização de dados de um data set refererente a estudantes, permitindo também a identificação de fatores que levam a reprovação. Para além tem um tratamento de dados completo para a utilização de modelos de ML incluindo um modelo de Regressão Logistica, SVM (com e sem GridSearchCV) , AdaBoostClassifier, KNN, Random forest(com e sem GridSearchCV), Gradient Boosting.
+Foi selecionado como melhor modelo o `ADABOOST CLASSIFIER`, após compração cpmo as metricas de avaliação de accuracy,precion,recall,ROC AUC da biblioteca scikit-learn.
+
 Esta aplicação web interativa, desenvolvida com Streamlit, tem como objetivo analisar e visualizar dados de desempenho de estudantes e utilizar um modelo de Machine Learning para prever o sucesso académico. A aplicação baseia-se no dataset `student-data.csv` e num pipeline de Machine Learning (pré-processamento e modelo) previamente treinado e guardado.
 
 A ferramenta permite explorar os dados, fazer previsões individuais para um aluno e analisar as métricas de avaliação e a interpretabilidade do modelo treinado.
