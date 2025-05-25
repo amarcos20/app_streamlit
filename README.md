@@ -87,11 +87,11 @@ Esta aplicação espera que os seguintes ficheiros existam no diretório correto
 
 Esta aplicação foi desenvolvida no âmbito de um projeto académico da cadeira de Elementos de Inteligência Artifcial e Ciência de Dados pelos alunos:
 
-Afonso Marcos(202404088)
+Afonso Marcos (202404088)
 
-Pedro Afonso(202404125)
+Pedro Afonso (202404125)
 
-Afonso Silva(202406661)
+Afonso Silva (202406661)
 
 
-© 2025 Sistema de Intervenção de Estudantes. Desenvolvido com Streamlit.
+© 2025 Sistema de Intervenção de Estudantes.
