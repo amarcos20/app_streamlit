@@ -7,6 +7,7 @@
 Esta aplicação web interativa, desenvolvida com Streamlit, tem como objetivo analisar e visualizar dados de desempenho de estudantes e utilizar um modelo de Machine Learning para prever o sucesso académico. A aplicação baseia-se no dataset `student-data.csv` e num pipeline de Machine Learning (pré-processamento e modelo) previamente treinado e guardado.
 
 A ferramenta permite explorar os dados, fazer previsões individuais para um aluno e analisar as métricas de avaliação e a interpretabilidade do modelo treinado.
+
 A nossa app : `https://amarcos.streamlit.app`
 
 ## Funcionalidades
